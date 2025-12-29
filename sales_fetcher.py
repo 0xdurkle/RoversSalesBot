@@ -700,27 +700,55 @@ class SalesFetcher:
                 try:
                     ipfs_metadata = await self._fetch_metadata_from_ipfs(ipfs_hash)
                     if ipfs_metadata:
-                        # Extract image field from IPFS metadata
+                        # PRIORITY 1: Look for thumbnail/preview fields first (for video NFTs)
+                        thumbnail_fields = [
+                            "thumbnail", "thumbnail_image", "thumbnailImage", 
+                            "preview", "preview_image", "previewImage",
+                            "image_thumbnail", "imageThumbnail",
+                            "poster", "poster_image", "posterImage"
+                        ]
+                        
+                        thumbnail_found = False
+                        for thumb_field in thumbnail_fields:
+                            thumb_value = ipfs_metadata.get(thumb_field)
+                            if thumb_value:
+                                thumb_hash = self._extract_ipfs_hash(thumb_value)
+                                if thumb_hash:
+                                    image_urls.append(f"https://cloudflare-ipfs.com/ipfs/{thumb_hash}")
+                                    logger.info(f"Found IPFS thumbnail hash for token {token_id} from field '{thumb_field}': {thumb_hash[:20]}...")
+                                    thumbnail_found = True
+                                    break
+                        
+                        # PRIORITY 2: Check if image field is a video, if so skip it
                         image_field = ipfs_metadata.get("image", "")
                         if image_field:
-                            # Extract IPFS hash from image field
-                            image_hash = self._extract_ipfs_hash(image_field)
-                            if image_hash:
-                                # Convert to gateway URLs
-                                gateways = [
-                                    "https://cloudflare-ipfs.com/ipfs/",
-                                    "https://ipfs.io/ipfs/",
-                                    "https://gateway.pinata.cloud/ipfs/",
-                                ]
-                                # Use Cloudflare as primary (most reliable)
-                                image_urls.append(f"https://cloudflare-ipfs.com/ipfs/{image_hash}")
-                                logger.info(f"Found IPFS image hash for token {token_id}: {image_hash[:20]}...")
+                            # Check if it's a video file
+                            is_video = False
+                            if isinstance(image_field, str):
+                                is_video = any(ext in image_field.lower() for ext in ['.mp4', '.webm', '.mov', '.avi', 'video'])
+                            
+                            # Also check animation_url (often used for videos)
+                            animation_url = ipfs_metadata.get("animation_url", "") or ipfs_metadata.get("animationUrl", "")
+                            if animation_url and image_field == animation_url:
+                                is_video = True
+                                logger.info(f"Image field matches animation_url (likely video), skipping for token {token_id}")
+                            
+                            # Only use image field if it's NOT a video (or if we didn't find a thumbnail)
+                            if not is_video or not thumbnail_found:
+                                image_hash = self._extract_ipfs_hash(image_field)
+                                if image_hash:
+                                    # Skip if it's clearly a video file
+                                    if not any(ext in image_hash.lower() for ext in ['.mp4', '.webm', '.mov']):
+                                        image_urls.append(f"https://cloudflare-ipfs.com/ipfs/{image_hash}")
+                                        logger.info(f"Found IPFS image hash for token {token_id}: {image_hash[:20]}...")
+                                    else:
+                                        logger.debug(f"Skipping video file from image field: {image_hash[:20]}...")
                 except Exception as e:
                     logger.debug(f"Error fetching IPFS metadata for hash {ipfs_hash}: {e}")
                     continue
             
-            # Also try to extract IPFS hash directly from image URLs in metadata
-            # Sometimes the image field already contains an IPFS hash
+            # Also try to extract thumbnail/IPFS hash directly from Alchemy metadata
+            # Check for thumbnail URLs in Alchemy's processed metadata (these are often more reliable)
             for source_name in ["image", "metadata.image", "media.raw.originalUrl"]:
                 try:
                     if source_name == "image":
@@ -731,14 +759,38 @@ class SalesFetcher:
                         media = metadata.get("media", [])
                         img_data = media[0].get("raw", {}).get("originalUrl", "") if media else ""
                     
-                    if isinstance(img_data, str):
-                        ipfs_hash = self._extract_ipfs_hash(img_data)
-                        if ipfs_hash:
-                            image_urls.append(f"https://cloudflare-ipfs.com/ipfs/{ipfs_hash}")
-                    elif isinstance(img_data, dict):
+                    # If it's a dict, prioritize thumbnailUrl and pngUrl over originalUrl
+                    if isinstance(img_data, dict):
+                        # Check for thumbnail first
+                        thumbnail_url = img_data.get("thumbnailUrl") or img_data.get("thumbnail")
+                        if thumbnail_url:
+                            ipfs_hash = self._extract_ipfs_hash(thumbnail_url)
+                            if ipfs_hash:
+                                image_urls.append(f"https://cloudflare-ipfs.com/ipfs/{ipfs_hash}")
+                                logger.info(f"Found thumbnail from {source_name} for token {token_id}")
+                                continue
+                        
+                        # Then check PNG URL
+                        png_url = img_data.get("pngUrl")
+                        if png_url:
+                            ipfs_hash = self._extract_ipfs_hash(png_url)
+                            if ipfs_hash:
+                                image_urls.append(f"https://cloudflare-ipfs.com/ipfs/{ipfs_hash}")
+                                logger.info(f"Found PNG from {source_name} for token {token_id}")
+                                continue
+                        
+                        # Last resort: originalUrl (but skip if it's a video)
                         original_url = img_data.get("originalUrl", "")
                         if original_url:
-                            ipfs_hash = self._extract_ipfs_hash(original_url)
+                            # Skip if it's clearly a video
+                            if not any(ext in original_url.lower() for ext in ['.mp4', '.webm', '.mov', 'video']):
+                                ipfs_hash = self._extract_ipfs_hash(original_url)
+                                if ipfs_hash:
+                                    image_urls.append(f"https://cloudflare-ipfs.com/ipfs/{ipfs_hash}")
+                    elif isinstance(img_data, str):
+                        # Skip if it's a video file
+                        if not any(ext in img_data.lower() for ext in ['.mp4', '.webm', '.mov']):
+                            ipfs_hash = self._extract_ipfs_hash(img_data)
                             if ipfs_hash:
                                 image_urls.append(f"https://cloudflare-ipfs.com/ipfs/{ipfs_hash}")
                 except Exception as e:
@@ -941,9 +993,18 @@ class SalesFetcher:
                         logger.warning(f"Image data too small ({len(image_data)} bytes), might not be valid")
                         return None
                     
-                    # Check if it's actually a video file by content type or magic bytes
-                    if 'video' in content_type.lower() or image_data.startswith(b'\x00\x00\x00\x18ftyp') or image_data.startswith(b'\x1a\x45\xdf\xa3'):
-                        logger.warning(f"URL returned video content (Content-Type: {content_type}), skipping")
+                    # Check if it's actually a video file by content type, magic bytes, or URL
+                    is_video_file = False
+                    if 'video' in content_type.lower():
+                        is_video_file = True
+                    elif image_data.startswith(b'\x00\x00\x00\x18ftyp') or image_data.startswith(b'\x1a\x45\xdf\xa3'):
+                        # MP4 or WebM magic bytes
+                        is_video_file = True
+                    elif any(ext in image_url.lower() for ext in ['.mp4', '.webm', '.mov', '.avi', '.mkv']):
+                        is_video_file = True
+                    
+                    if is_video_file:
+                        logger.warning(f"URL returned video content (Content-Type: {content_type}, URL: {image_url[:60]}...), skipping")
                         return None
                     
                     logger.info(f"Downloaded image: {len(image_data)} bytes, Content-Type: {content_type} from {image_url[:60]}...")
