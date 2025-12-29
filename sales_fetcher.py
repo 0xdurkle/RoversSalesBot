@@ -169,6 +169,18 @@ class SalesFetcher:
         """
         return await self._rpc_call("eth_getTransactionByHash", [tx_hash])
     
+    async def get_transaction_receipt(self, tx_hash: str) -> dict:
+        """
+        Get transaction receipt by hash (includes logs).
+        
+        Args:
+            tx_hash: Transaction hash
+            
+        Returns:
+            Transaction receipt with logs
+        """
+        return await self._rpc_call("eth_getTransactionReceipt", [tx_hash])
+    
     async def get_asset_transfers(
         self,
         from_address: Optional[str] = None,
