@@ -345,15 +345,28 @@ async def process_webhook_events_grouped(tx_hash: str, events: List[dict]):
             except Exception as e:
                 logger.warning(f"Failed to download image for webhook sale: {e}")
         
+        # Get channel if not already set (in case it wasn't found at startup)
+        if not discord_channel:
+            discord_channel = client.get_channel(DISCORD_CHANNEL_ID)
+            if not discord_channel:
+                # Try fetching from all guilds
+                for guild in client.guilds:
+                    channel = guild.get_channel(DISCORD_CHANNEL_ID)
+                    if channel:
+                        discord_channel = channel
+                        logger.info(f"Found channel in guild: {guild.name}")
+                        break
+        
         if discord_channel:
-            if file:
-                await discord_channel.send(embed=embed, file=file)
-                logger.info("Posted sale with image attachment")
-            else:
-                await discord_channel.send(embed=embed)
-                if not image_urls:
-                    logger.warning(f"No images found for webhook sale token ID(s): {token_ids}")
-            logger.info(
+            try:
+                if file:
+                    await discord_channel.send(embed=embed, file=file)
+                    logger.info("Posted sale with image attachment")
+                else:
+                    await discord_channel.send(embed=embed)
+                    if not image_urls:
+                        logger.warning(f"No images found for webhook sale token ID(s): {token_ids}")
+                logger.info(
                 f"Posted sale: {sale.token_count} NFT(s) for {format_price(price, is_weth)} "
                 f"in tx {tx_hash}"
             )
@@ -487,15 +500,29 @@ async def on_ready():
     # Initialize sales fetcher
     sales_fetcher = SalesFetcher(ALCHEMY_API_KEY, NFT_CONTRACT_ADDRESS)
     
-    # Get Discord channel
+    # Get Discord channel - try multiple methods
     try:
+        # Method 1: Direct channel lookup (works if bot can see the channel)
         discord_channel = client.get_channel(DISCORD_CHANNEL_ID)
+        
+        # Method 2: If not found, try fetching from all guilds
         if discord_channel is None:
-            logger.error(f"Channel {DISCORD_CHANNEL_ID} not found")
+            logger.warning(f"Channel {DISCORD_CHANNEL_ID} not found via direct lookup, trying guild search...")
+            for guild in client.guilds:
+                channel = guild.get_channel(DISCORD_CHANNEL_ID)
+                if channel:
+                    discord_channel = channel
+                    logger.info(f"Found channel in guild: {guild.name}")
+                    break
+        
+        # Method 3: If still not found, try fetching via API
+        if discord_channel is None:
+            logger.warning(f"Channel {DISCORD_CHANNEL_ID} still not found, will try to fetch on first use")
         else:
-            logger.info(f"Monitoring channel: {discord_channel.name}")
+            logger.info(f"Monitoring channel: {discord_channel.name} (ID: {discord_channel.id})")
     except Exception as e:
         logger.error(f"Error getting channel: {e}")
+        logger.warning("Bot will continue but may not be able to post to channel until it's accessible")
     
     # Sync slash commands
     try:
