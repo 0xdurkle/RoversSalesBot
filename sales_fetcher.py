@@ -440,16 +440,17 @@ class SalesFetcher:
                                 image_url = original_url.strip()
                                 logger.info(f"Found originalUrl in top-level (not Alchemy CDN): {image_url[:80]}...")
                     
-                    # If we don't have an image yet (or skipped video URLs), prefer PNG/thumbnail
+                    # If we don't have an image yet (or skipped video URLs), prefer thumbnail over PNG
+                    # Thumbnails are usually smaller and more reliable than full PNG conversions
                     if not image_url:
-                        if png_url and isinstance(png_url, str) and png_url.strip():
+                        if thumbnail_url and isinstance(thumbnail_url, str) and thumbnail_url.strip():
+                            # Thumbnail URLs are usually still images, not videos, and are smaller/more reliable
+                            image_url = thumbnail_url.strip()
+                            logger.info(f"✅ FOUND thumbnailUrl in top-level (using as image - preferred over PNG): {image_url[:60]}...")
+                        elif png_url and isinstance(png_url, str) and png_url.strip():
                             # PNG URLs are usually still images, not videos
                             image_url = png_url.strip()
                             logger.info(f"✅ FOUND pngUrl in top-level (using as image): {image_url[:60]}...")
-                        elif thumbnail_url and isinstance(thumbnail_url, str) and thumbnail_url.strip():
-                            # Thumbnail URLs are usually still images, not videos
-                            image_url = thumbnail_url.strip()
-                            logger.info(f"✅ FOUND thumbnailUrl in top-level (using as image): {image_url[:60]}...")
                         else:
                             # Store Cloudinary URLs as fallback if we still don't have anything
                             if png_url and isinstance(png_url, str) and png_url.strip():
