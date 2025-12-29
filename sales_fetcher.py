@@ -299,12 +299,43 @@ class SalesFetcher:
             logger.info(f"🔍 Checking for WETH transfers around block {block_num} for tx {tx_hash[:16]}...")
             logger.info(f"🔍 Seller: {seller_address[:10] if seller_address else 'None'}..., Buyer: {buyer_address[:10] if buyer_address else 'None'}...")
             
-            # Check a range of blocks around the transaction block (WETH transfers can be in nearby blocks)
-            # Check from block-5 to block+5 to catch WETH transfers (wider range for better detection)
-            from_block = max(0, block_num - 5)
-            to_block = block_num + 5
+            seller_lower = seller_address.lower() if seller_address else None
+            buyer_lower = buyer_address.lower() if buyer_address else None
             
-            logger.info(f"🔍 Checking WETH transfers in blocks {from_block} to {to_block} (range: {to_block - from_block} blocks)")
+            weth_total = 0
+            transfers_list = []
+            
+            # Strategy 1: If we have buyer and seller addresses, query WETH transfers directly by addresses
+            # This is the most reliable method - query transfers from buyer to seller with wide block range
+            if buyer_lower and seller_lower:
+                logger.info(f"🔍 Strategy 1: Querying WETH transfers from buyer {buyer_lower[:10]}... to seller {seller_lower[:10]}... (direct address query)")
+                # Use a very wide block range (±100 blocks) for direct address queries
+                direct_from_block = max(0, block_num - 100)
+                direct_to_block = block_num + 100
+                
+                direct_transfers = await self.get_asset_transfers(
+                    contract_address=WETH_CONTRACT,
+                    category=["erc20"],
+                    from_address=buyer_lower,
+                    to_address=seller_lower,
+                    from_block=hex(direct_from_block),
+                    to_block=hex(direct_to_block)
+                )
+                direct_list = direct_transfers.get("transfers", [])
+                logger.info(f"🔍 Found {len(direct_list)} WETH transfer(s) from buyer to seller in blocks {direct_from_block}-{direct_to_block}")
+                
+                # Add all direct transfers to the list
+                for direct_transfer in direct_list:
+                    direct_hash = direct_transfer.get("hash", "")
+                    transfers_list.append(direct_transfer)
+                    logger.debug(f"➕ Found WETH transfer: {direct_hash[:16]}... from {buyer_lower[:10]}... to {seller_lower[:10]}...")
+            
+            # Strategy 2: Also check block range around the transaction (in case addresses don't match exactly)
+            # Check from block-20 to block+20 to catch WETH transfers
+            from_block = max(0, block_num - 20)
+            to_block = block_num + 20
+            
+            logger.info(f"🔍 Strategy 2: Checking WETH transfers in blocks {from_block} to {to_block} (range: {to_block - from_block} blocks)")
             
             # Get ERC-20 transfers for this block range (WETH only)
             transfers = await self.get_asset_transfers(
@@ -314,12 +345,18 @@ class SalesFetcher:
                 to_block=hex(to_block)
             )
             
-            weth_total = 0
-            transfers_list = transfers.get("transfers", [])
-            logger.info(f"🔍 Found {len(transfers_list)} WETH transfer(s) in block range {from_block}-{to_block}")
+            block_range_list = transfers.get("transfers", [])
+            logger.info(f"🔍 Found {len(block_range_list)} WETH transfer(s) in block range {from_block}-{to_block}")
             
-            seller_lower = seller_address.lower() if seller_address else None
-            buyer_lower = buyer_address.lower() if buyer_address else None
+            # Add transfers from block range (avoid duplicates)
+            for transfer in block_range_list:
+                transfer_hash = transfer.get("hash", "")
+                # Only add if not already in transfers_list
+                if not any(t.get("hash", "").lower() == transfer_hash.lower() for t in transfers_list):
+                    transfers_list.append(transfer)
+                    logger.debug(f"➕ Added WETH transfer from block range: {transfer_hash[:16]}...")
+            
+            logger.info(f"🔍 Total WETH transfers to check: {len(transfers_list)}")
             
             # Filter transfers - WETH payment goes TO the seller (seller receives payment)
             # Check both: same transaction hash OR matching addresses (WETH might be in different tx)
