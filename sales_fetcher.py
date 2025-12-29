@@ -398,167 +398,167 @@ class SalesFetcher:
                 else:
                     # Continue checking other sources if we didn't find Alchemy CDN URL
                     # 1. Try media[0].gateway (can be string or dict)
-                media = result.get("media", [])
-                logger.info(f"Media array length: {len(media) if media else 0}")
-                if media and len(media) > 0:
-                    media_item = media[0]
-                    # Log the full media item structure for debugging
-                    logger.info(f"Media item type: {type(media_item)}")
-                    if isinstance(media_item, dict):
-                        logger.info(f"Media item keys: {list(media_item.keys())}")
-                        # Log the full media item (truncated)
-                        logger.info(f"Media item (first 500 chars): {str(media_item)[:500]}")
-                    
-                    gateway_value = media_item.get('gateway') if isinstance(media_item, dict) else None
-                    raw_value = media_item.get('raw') if isinstance(media_item, dict) else None
-                    
-                    logger.info(f"Gateway type: {type(gateway_value)}, value: {str(gateway_value)[:100] if gateway_value else 'None'}")
-                    logger.info(f"Raw type: {type(raw_value)}, is_dict: {isinstance(raw_value, dict) if raw_value else False}")
-                    
-                    if isinstance(gateway_value, dict):
-                        logger.info(f"Gateway dict keys: {list(gateway_value.keys())}")
-                        logger.info(f"Gateway dict has pngUrl: {bool(gateway_value.get('pngUrl'))}")
-                        logger.info(f"Gateway dict has thumbnailUrl: {bool(gateway_value.get('thumbnailUrl'))}")
-                        if gateway_value.get('pngUrl'):
-                            logger.info(f"PNG URL found in gateway: {gateway_value.get('pngUrl')[:80]}...")
-                        if gateway_value.get('thumbnailUrl'):
-                            logger.info(f"Thumbnail URL found in gateway: {gateway_value.get('thumbnailUrl')[:80]}...")
-                    
-                    if isinstance(raw_value, dict):
-                        logger.info(f"Raw dict keys: {list(raw_value.keys())}")
-                        if raw_value.get('pngUrl'):
-                            logger.info(f"PNG URL found in raw: {raw_value.get('pngUrl')[:80]}...")
-                        if raw_value.get('thumbnailUrl'):
-                            logger.info(f"Thumbnail URL found in raw: {raw_value.get('thumbnailUrl')[:80]}...")
-                    
-                    # Check content type at media item level first
-                    content_type = media_item.get("contentType", "")
-                    is_video = "video" in content_type.lower() if content_type else False
-                    logger.debug(f"Content type: {content_type}, is_video: {is_video}")
-                    
-                    # Handle case where gateway is a dict with multiple URL options
-                    if isinstance(media_item.get("gateway"), dict):
-                        gateway_dict = media_item.get("gateway")
-                        # Also check contentType in the dict
-                        if not is_video:
-                            is_video = "video" in gateway_dict.get("contentType", "").lower()
+                    media = result.get("media", [])
+                    logger.info(f"Media array length: {len(media) if media else 0}")
+                    if media and len(media) > 0:
+                        media_item = media[0]
+                        # Log the full media item structure for debugging
+                        logger.info(f"Media item type: {type(media_item)}")
+                        if isinstance(media_item, dict):
+                            logger.info(f"Media item keys: {list(media_item.keys())}")
+                            # Log the full media item (truncated)
+                            logger.info(f"Media item (first 500 chars): {str(media_item)[:500]}")
                         
-                        # Log what's available in the dict for debugging
-                        logger.debug(f"Gateway dict keys: {list(gateway_dict.keys())}")
-                        logger.debug(f"Has pngUrl: {bool(gateway_dict.get('pngUrl'))}")
-                        logger.debug(f"Has thumbnailUrl: {bool(gateway_dict.get('thumbnailUrl'))}")
-                        logger.debug(f"ContentType: {gateway_dict.get('contentType', 'unknown')}")
+                        gateway_value = media_item.get('gateway') if isinstance(media_item, dict) else None
+                        raw_value = media_item.get('raw') if isinstance(media_item, dict) else None
                         
-                        # For embed images, prefer cachedUrl (Alchemy CDN) over Cloudinary URLs
-                        # Cloudinary URLs often return 400 errors, while Alchemy CDN works reliably
-                        # Note: cachedUrl may be large (>8MB) but works fine for Discord embeds
-                        gateway_cached = gateway_dict.get("cachedUrl")
-                        gateway_png = gateway_dict.get("pngUrl")
-                        gateway_thumb = gateway_dict.get("thumbnailUrl")
-                        gateway_original = gateway_dict.get("originalUrl")
+                        logger.info(f"Gateway type: {type(gateway_value)}, value: {str(gateway_value)[:100] if gateway_value else 'None'}")
+                        logger.info(f"Raw type: {type(raw_value)}, is_dict: {isinstance(raw_value, dict) if raw_value else False}")
                         
-                        logger.info(f"🔍 Gateway dict URLs - cachedUrl: {bool(gateway_cached)}, pngUrl: {bool(gateway_png)}, thumbnailUrl: {bool(gateway_thumb)}, originalUrl: {bool(gateway_original)}")
+                        if isinstance(gateway_value, dict):
+                            logger.info(f"Gateway dict keys: {list(gateway_value.keys())}")
+                            logger.info(f"Gateway dict has pngUrl: {bool(gateway_value.get('pngUrl'))}")
+                            logger.info(f"Gateway dict has thumbnailUrl: {bool(gateway_value.get('thumbnailUrl'))}")
+                            if gateway_value.get('pngUrl'):
+                                logger.info(f"PNG URL found in gateway: {gateway_value.get('pngUrl')[:80]}...")
+                            if gateway_value.get('thumbnailUrl'):
+                                logger.info(f"Thumbnail URL found in gateway: {gateway_value.get('thumbnailUrl')[:80]}...")
                         
-                        if gateway_cached and isinstance(gateway_cached, str) and gateway_cached.strip():
-                            image_url = gateway_cached.strip()
-                            logger.info(f"✅ SELECTED: cached URL from gateway (Alchemy CDN): {image_url}")
-                        elif gateway_original and isinstance(gateway_original, str) and gateway_original.strip():
-                            # Check if originalUrl is Alchemy CDN
-                            if "nft-cdn.alchemy.com" in gateway_original:
-                                image_url = gateway_original.strip()
-                                logger.info(f"✅ SELECTED: original URL from gateway (Alchemy CDN): {image_url[:60]}...")
+                        if isinstance(raw_value, dict):
+                            logger.info(f"Raw dict keys: {list(raw_value.keys())}")
+                            if raw_value.get('pngUrl'):
+                                logger.info(f"PNG URL found in raw: {raw_value.get('pngUrl')[:80]}...")
+                            if raw_value.get('thumbnailUrl'):
+                                logger.info(f"Thumbnail URL found in raw: {raw_value.get('thumbnailUrl')[:80]}...")
+                        
+                        # Check content type at media item level first
+                        content_type = media_item.get("contentType", "")
+                        is_video = "video" in content_type.lower() if content_type else False
+                        logger.debug(f"Content type: {content_type}, is_video: {is_video}")
+                        
+                        # Handle case where gateway is a dict with multiple URL options
+                        if isinstance(media_item.get("gateway"), dict):
+                            gateway_dict = media_item.get("gateway")
+                            # Also check contentType in the dict
+                            if not is_video:
+                                is_video = "video" in gateway_dict.get("contentType", "").lower()
+                            
+                            # Log what's available in the dict for debugging
+                            logger.debug(f"Gateway dict keys: {list(gateway_dict.keys())}")
+                            logger.debug(f"Has pngUrl: {bool(gateway_dict.get('pngUrl'))}")
+                            logger.debug(f"Has thumbnailUrl: {bool(gateway_dict.get('thumbnailUrl'))}")
+                            logger.debug(f"ContentType: {gateway_dict.get('contentType', 'unknown')}")
+                            
+                            # For embed images, prefer cachedUrl (Alchemy CDN) over Cloudinary URLs
+                            # Cloudinary URLs often return 400 errors, while Alchemy CDN works reliably
+                            # Note: cachedUrl may be large (>8MB) but works fine for Discord embeds
+                            gateway_cached = gateway_dict.get("cachedUrl")
+                            gateway_png = gateway_dict.get("pngUrl")
+                            gateway_thumb = gateway_dict.get("thumbnailUrl")
+                            gateway_original = gateway_dict.get("originalUrl")
+                            
+                            logger.info(f"🔍 Gateway dict URLs - cachedUrl: {bool(gateway_cached)}, pngUrl: {bool(gateway_png)}, thumbnailUrl: {bool(gateway_thumb)}, originalUrl: {bool(gateway_original)}")
+                            
+                            if gateway_cached and isinstance(gateway_cached, str) and gateway_cached.strip():
+                                image_url = gateway_cached.strip()
+                                logger.info(f"✅ SELECTED: cached URL from gateway (Alchemy CDN): {image_url}")
+                            elif gateway_original and isinstance(gateway_original, str) and gateway_original.strip():
+                                # Check if originalUrl is Alchemy CDN
+                                if "nft-cdn.alchemy.com" in gateway_original:
+                                    image_url = gateway_original.strip()
+                                    logger.info(f"✅ SELECTED: original URL from gateway (Alchemy CDN): {image_url[:60]}...")
+                                else:
+                                    image_url = gateway_original.strip()
+                                    logger.info(f"SELECTED: original URL from gateway: {image_url[:60]}...")
+                            elif gateway_png and isinstance(gateway_png, str) and gateway_png.strip():
+                                # Store Cloudinary URL as fallback, but continue checking for better URLs
+                                cloudinary_url = gateway_png.strip()
+                                logger.info(f"Found Cloudinary PNG URL in gateway (will use as fallback if no better URL found): {cloudinary_url[:60]}...")
+                                # Don't set image_url yet - continue checking other sources
+                            elif gateway_thumb and isinstance(gateway_thumb, str) and gateway_thumb.strip():
+                                # Store Cloudinary URL as fallback, but continue checking for better URLs
+                                if not cloudinary_url:  # Only use thumbnail if we don't have PNG
+                                    cloudinary_url = gateway_thumb.strip()
+                                    logger.info(f"Found Cloudinary thumbnail URL in gateway (will use as fallback if no better URL found): {cloudinary_url[:60]}...")
+                                # Don't set image_url yet - continue checking other sources
+                            elif is_video:
+                                # For videos without cached URL, log warning
+                                logger.warning(f"Video detected but no cached URL available. Available keys: {list(gateway_dict.keys())}")
+                                image_url = gateway_original if gateway_original else None
                             else:
-                                image_url = gateway_original.strip()
-                                logger.info(f"SELECTED: original URL from gateway: {image_url[:60]}...")
-                        elif gateway_png and isinstance(gateway_png, str) and gateway_png.strip():
-                            # Store Cloudinary URL as fallback, but continue checking for better URLs
-                            cloudinary_url = gateway_png.strip()
-                            logger.info(f"Found Cloudinary PNG URL in gateway (will use as fallback if no better URL found): {cloudinary_url[:60]}...")
-                            # Don't set image_url yet - continue checking other sources
-                        elif gateway_thumb and isinstance(gateway_thumb, str) and gateway_thumb.strip():
-                            # Store Cloudinary URL as fallback, but continue checking for better URLs
-                            if not cloudinary_url:  # Only use thumbnail if we don't have PNG
-                                cloudinary_url = gateway_thumb.strip()
-                                logger.info(f"Found Cloudinary thumbnail URL in gateway (will use as fallback if no better URL found): {cloudinary_url[:60]}...")
-                            # Don't set image_url yet - continue checking other sources
-                        elif is_video:
-                            # For videos without cached URL, log warning
-                            logger.warning(f"Video detected but no cached URL available. Available keys: {list(gateway_dict.keys())}")
-                            image_url = gateway_original if gateway_original else None
+                                # Last resort: originalUrl
+                                image_url = gateway_original if gateway_original else None
                         else:
-                            # Last resort: originalUrl
-                            image_url = gateway_original if gateway_original else None
-                    else:
-                        # Gateway is a string URL directly
-                        image_url = media_item.get("gateway")
-                        logger.info(f"Gateway is a string URL: {image_url[:80] if image_url else 'None'}...")
-                        # Check if it's a video URL - if so, try to get PNG from raw
-                        if image_url and ("video" in content_type.lower() or ".mp4" in image_url.lower()):
-                            logger.info("Video URL detected in string gateway, checking raw for PNG/thumbnail")
+                            # Gateway is a string URL directly
+                            image_url = media_item.get("gateway")
+                            logger.info(f"Gateway is a string URL: {image_url[:80] if image_url else 'None'}...")
+                            # Check if it's a video URL - if so, try to get PNG from raw
+                            if image_url and ("video" in content_type.lower() or ".mp4" in image_url.lower()):
+                                logger.info("Video URL detected in string gateway, checking raw for PNG/thumbnail")
+                                raw_item = media_item.get("raw")
+                                if isinstance(raw_item, dict):
+                                    if raw_item.get("pngUrl"):
+                                        image_url = raw_item.get("pngUrl")
+                                        logger.info(f"Found PNG URL in raw: {image_url[:80]}...")
+                                    elif raw_item.get("thumbnailUrl"):
+                                        image_url = raw_item.get("thumbnailUrl")
+                                        logger.info(f"Found thumbnail URL in raw: {image_url[:80]}...")
+                        
+                        # Fallback to raw if gateway didn't work
+                        if not image_url:
                             raw_item = media_item.get("raw")
                             if isinstance(raw_item, dict):
-                                if raw_item.get("pngUrl"):
+                                if not is_video:
+                                    is_video = "video" in raw_item.get("contentType", "").lower()
+                                
+                                # Prefer cachedUrl (Alchemy CDN) over Cloudinary URLs for embeds
+                                if raw_item.get("cachedUrl"):
+                                    image_url = raw_item.get("cachedUrl")
+                                    logger.info(f"Using cached URL from raw (Alchemy CDN): {image_url[:60]}...")
+                                elif raw_item.get("pngUrl"):
                                     image_url = raw_item.get("pngUrl")
-                                    logger.info(f"Found PNG URL in raw: {image_url[:80]}...")
+                                    logger.info(f"Using PNG URL from raw (Cloudinary): {image_url[:60]}...")
                                 elif raw_item.get("thumbnailUrl"):
                                     image_url = raw_item.get("thumbnailUrl")
-                                    logger.info(f"Found thumbnail URL in raw: {image_url[:80]}...")
+                                    logger.info(f"Using thumbnail URL from raw (Cloudinary): {image_url[:60]}...")
+                                elif is_video:
+                                    logger.warning("Video in raw but no cached URL available")
+                                    image_url = raw_item.get("originalUrl")
+                                else:
+                                    image_url = raw_item.get("originalUrl")
+                            else:
+                                image_url = raw_item
                     
-                    # Fallback to raw if gateway didn't work
+                    # 2. Try metadata.image
                     if not image_url:
-                        raw_item = media_item.get("raw")
-                        if isinstance(raw_item, dict):
-                            if not is_video:
-                                is_video = "video" in raw_item.get("contentType", "").lower()
-                            
-                            # Prefer cachedUrl (Alchemy CDN) over Cloudinary URLs for embeds
-                            if raw_item.get("cachedUrl"):
-                                image_url = raw_item.get("cachedUrl")
-                                logger.info(f"Using cached URL from raw (Alchemy CDN): {image_url[:60]}...")
-                            elif raw_item.get("pngUrl"):
-                                image_url = raw_item.get("pngUrl")
-                                logger.info(f"Using PNG URL from raw (Cloudinary): {image_url[:60]}...")
-                            elif raw_item.get("thumbnailUrl"):
-                                image_url = raw_item.get("thumbnailUrl")
-                                logger.info(f"Using thumbnail URL from raw (Cloudinary): {image_url[:60]}...")
-                            elif is_video:
-                                logger.warning("Video in raw but no cached URL available")
-                                image_url = raw_item.get("originalUrl")
+                        metadata = result.get("metadata", {})
+                        logger.info(f"Metadata type: {type(metadata)}, keys: {list(metadata.keys()) if isinstance(metadata, dict) else 'N/A'}")
+                        if metadata:
+                            meta_image = metadata.get("image")
+                            logger.info(f"Metadata image type: {type(meta_image)}, value: {str(meta_image)[:200] if meta_image else 'None'}")
+                            # Handle dict case
+                            if isinstance(meta_image, dict):
+                                logger.info(f"Metadata image dict keys: {list(meta_image.keys())}")
+                                # Prefer cachedUrl for embeds
+                                if meta_image.get("cachedUrl"):
+                                    image_url = meta_image.get("cachedUrl")
+                                    logger.info(f"Using cached URL from metadata.image (Alchemy CDN): {image_url[:80]}...")
+                                elif meta_image.get("pngUrl"):
+                                    image_url = meta_image.get("pngUrl")
+                                    logger.info(f"Using PNG URL from metadata.image (Cloudinary): {image_url[:80]}...")
+                                elif meta_image.get("thumbnailUrl"):
+                                    image_url = meta_image.get("thumbnailUrl")
+                                    logger.info(f"Using thumbnail URL from metadata.image (Cloudinary): {image_url[:80]}...")
+                                else:
+                                    image_url = meta_image.get("originalUrl")
                             else:
-                                image_url = raw_item.get("originalUrl")
-                        else:
-                            image_url = raw_item
-                
-                # 2. Try metadata.image
-                if not image_url:
-                    metadata = result.get("metadata", {})
-                    logger.info(f"Metadata type: {type(metadata)}, keys: {list(metadata.keys()) if isinstance(metadata, dict) else 'N/A'}")
-                    if metadata:
-                        meta_image = metadata.get("image")
-                        logger.info(f"Metadata image type: {type(meta_image)}, value: {str(meta_image)[:200] if meta_image else 'None'}")
-                        # Handle dict case
-                        if isinstance(meta_image, dict):
-                            logger.info(f"Metadata image dict keys: {list(meta_image.keys())}")
-                            # Prefer cachedUrl for embeds
-                            if meta_image.get("cachedUrl"):
-                                image_url = meta_image.get("cachedUrl")
-                                logger.info(f"Using cached URL from metadata.image (Alchemy CDN): {image_url[:80]}...")
-                            elif meta_image.get("pngUrl"):
-                                image_url = meta_image.get("pngUrl")
-                                logger.info(f"Using PNG URL from metadata.image (Cloudinary): {image_url[:80]}...")
-                            elif meta_image.get("thumbnailUrl"):
-                                image_url = meta_image.get("thumbnailUrl")
-                                logger.info(f"Using thumbnail URL from metadata.image (Cloudinary): {image_url[:80]}...")
-                            else:
-                                image_url = meta_image.get("originalUrl")
-                        else:
-                            image_url = meta_image
-                
-                # Final fallback: Use Cloudinary URL only if we have nothing else
-                if not image_url and cloudinary_url:
-                    image_url = cloudinary_url
-                    logger.warning(f"⚠️  FINAL FALLBACK: Using Cloudinary URL (may return 400): {image_url[:60]}...")
-                    logger.warning(f"⚠️  WARNING: No Alchemy CDN URL found, using Cloudinary which may fail!")
+                                image_url = meta_image
+                    
+                    # Final fallback: Use Cloudinary URL only if we have nothing else
+                    if not image_url and cloudinary_url:
+                        image_url = cloudinary_url
+                        logger.warning(f"⚠️  FINAL FALLBACK: Using Cloudinary URL (may return 400): {image_url[:60]}...")
+                        logger.warning(f"⚠️  WARNING: No Alchemy CDN URL found, using Cloudinary which may fail!")
                 
                 # Log where the image URL came from
                 if image_url:
