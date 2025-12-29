@@ -1,5 +1,6 @@
 """
 Alchemy API integration module for fetching NFT sales data.
+Includes IPFS direct image fetching for improved reliability.
 """
 import asyncio
 import logging
