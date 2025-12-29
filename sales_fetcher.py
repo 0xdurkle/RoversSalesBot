@@ -101,13 +101,14 @@ class SalesFetcher:
             logger.error(f"RPC call failed for {method}: {e}")
             return {}
     
-    async def _nft_api_call(self, endpoint: str, params: dict) -> dict:
+    async def _nft_api_call(self, endpoint: str, params: dict, max_retries: int = 3) -> dict:
         """
-        Make call to Alchemy NFT API.
+        Make call to Alchemy NFT API with retry logic for 500 errors.
         
         Args:
             endpoint: API endpoint (e.g., "getNFTMetadata")
             params: Query parameters
+            max_retries: Maximum number of retries for 500 errors
             
         Returns:
             Response data
@@ -115,17 +116,46 @@ class SalesFetcher:
         session = await self._get_session()
         url = f"{self.nft_api_url}/{endpoint}"
         
-        try:
-            async with session.get(
-                url,
-                params=params,
-                timeout=aiohttp.ClientTimeout(total=30)
-            ) as response:
-                response.raise_for_status()
-                return await response.json()
-        except Exception as e:
-            logger.error(f"NFT API call failed for {endpoint}: {e}")
-            return {}
+        for attempt in range(max_retries):
+            try:
+                async with session.get(
+                    url,
+                    params=params,
+                    timeout=aiohttp.ClientTimeout(total=30)
+                ) as response:
+                    # Retry on 500 errors (server errors are often transient)
+                    if response.status == 500:
+                        if attempt < max_retries - 1:
+                            wait_time = (attempt + 1) * 2  # 2s, 4s, 6s
+                            logger.warning(f"Alchemy API returned 500 for {endpoint}, retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})")
+                            await asyncio.sleep(wait_time)
+                            continue
+                        else:
+                            logger.error(f"Alchemy API returned 500 for {endpoint} after {max_retries} attempts")
+                            return {}
+                    
+                    # For other errors, raise immediately
+                    response.raise_for_status()
+                    return await response.json()
+            except aiohttp.client_exceptions.ClientResponseError as e:
+                # Don't retry on client errors (4xx)
+                if 400 <= e.status < 500:
+                    logger.error(f"NFT API call failed for {endpoint}: {e.status}, message='{e.message}', url='{url}'")
+                    return {}
+                # Retry on server errors (5xx) if we haven't exhausted retries
+                elif e.status >= 500 and attempt < max_retries - 1:
+                    wait_time = (attempt + 1) * 2
+                    logger.warning(f"Alchemy API returned {e.status} for {endpoint}, retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})")
+                    await asyncio.sleep(wait_time)
+                    continue
+                else:
+                    logger.error(f"NFT API call failed for {endpoint}: {e.status}, message='{e.message}', url='{url}'")
+                    return {}
+            except Exception as e:
+                logger.error(f"NFT API call failed for {endpoint}: {e}, url='{url}'")
+                return {}
+        
+        return {}
     
     async def get_transaction(self, tx_hash: str) -> dict:
         """
