@@ -18,8 +18,9 @@ import certifi
 logger = logging.getLogger(__name__)
 
 # WETH contract address on Ethereum mainnet
-# WETH contract address (can be overridden via WETH_CONTRACT_ADDRESS env var)
-WETH_CONTRACT = os.environ.get("WETH_CONTRACT_ADDRESS", "0xc02aa39b223fe8d0a0e5c4f27ead9083c756cc2").lower()
+# WETH contract address on Ethereum mainnet (can be overridden via WETH_CONTRACT_ADDRESS env var)
+# Correct address: 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2 (note: three 'a's after C02)
+WETH_CONTRACT = os.environ.get("WETH_CONTRACT_ADDRESS", "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2").lower()
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 
 # Cache configuration
@@ -357,6 +358,8 @@ class SalesFetcher:
                         logger.info(f"🔍 Strategy 0: Contract addresses: {', '.join([addr[:10] + '...' for addr in list(unique_contracts)[:5]])}...")
                     
                     weth_logs_found = 0
+                    all_weth_transfers = []  # Track all WETH transfers for fallback
+                    
                     for i, log in enumerate(logs):
                         log_address = log.get("address", "").lower()
                         # Check if this is a WETH contract log
@@ -373,25 +376,40 @@ class SalesFetcher:
                                     to_addr = "0x" + topics[2][-40:] if len(topics[2]) >= 42 else topics[2]
                                     value_hex = log.get("data", "0x0")
                                     
-                                    logger.info(f"🔍 Strategy 0: WETH Transfer - from: {from_addr[:10]}..., to: {to_addr[:10]}..., value: {value_hex[:20]}...")
-                                    logger.info(f"🔍 Strategy 0: Checking if to_addr ({to_addr.lower()[:10]}...) matches seller ({seller_lower[:10] if seller_lower else 'None'}...)")
+                                    try:
+                                        weth_amount = int(value_hex, 16) if value_hex != "0x0" else 0
+                                    except (ValueError, TypeError):
+                                        weth_amount = 0
+                                    
+                                    if weth_amount > 0:
+                                        all_weth_transfers.append({
+                                            "from": from_addr.lower(),
+                                            "to": to_addr.lower(),
+                                            "amount": weth_amount
+                                        })
+                                    
+                                    logger.info(f"🔍 Strategy 0: WETH Transfer - from: {from_addr[:10]}..., to: {to_addr[:10]}..., amount: {weth_amount / (10**18):.6f}")
                                     
                                     # Check if this transfer is to the seller
                                     if seller_lower and to_addr.lower() == seller_lower:
-                                        try:
-                                            weth_amount = int(value_hex, 16) if value_hex != "0x0" else 0
-                                            if weth_amount > 0:
-                                                weth_total += weth_amount
-                                                logger.info(f"✅ Strategy 0: Found WETH in same tx (from logs): {weth_amount / (10**18):.6f} WETH to seller {seller_lower[:10]}...")
-                                        except (ValueError, TypeError) as e:
-                                            logger.warning(f"⚠️ Strategy 0: Could not parse WETH amount: {e}")
+                                        if weth_amount > 0:
+                                            weth_total += weth_amount
+                                            logger.info(f"✅ Strategy 0: Found WETH in same tx (from logs): {weth_amount / (10**18):.6f} WETH to seller {seller_lower[:10]}...")
                                     else:
-                                        logger.info(f"⚠️ Strategy 0: WETH transfer to_addr ({to_addr.lower()[:10]}...) does not match seller ({seller_lower[:10] if seller_lower else 'None'}...)")
+                                        logger.debug(f"⚠️ Strategy 0: WETH transfer to_addr ({to_addr.lower()[:10]}...) does not match seller ({seller_lower[:10] if seller_lower else 'None'}...)")
+                    
+                    # If no WETH to seller found, use LARGEST WETH transfer as fallback
+                    # This handles cases where seller uses different address for payment
+                    if weth_total == 0 and all_weth_transfers:
+                        # Sort by amount descending and use the largest
+                        largest = max(all_weth_transfers, key=lambda x: x["amount"])
+                        weth_total = largest["amount"]
+                        logger.info(f"✅ Strategy 0 FALLBACK: Using largest WETH transfer: {weth_total / (10**18):.6f} WETH to {largest['to'][:10]}...")
                     
                     if weth_logs_found == 0:
                         logger.info(f"ℹ️ Strategy 0: No WETH contract logs found in transaction (checked {len(logs)} log(s))")
                     elif weth_total == 0:
-                        logger.info(f"ℹ️ Strategy 0: Found {weth_logs_found} WETH contract log(s), but no matching transfers to seller")
+                        logger.info(f"ℹ️ Strategy 0: Found {weth_logs_found} WETH contract log(s), but no matching transfers")
             except Exception as e:
                 logger.error(f"❌ Strategy 0: Error checking transaction receipt for WETH: {e}", exc_info=True)
             
