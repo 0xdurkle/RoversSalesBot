@@ -1398,7 +1398,7 @@ class SalesFetcher:
                 # Check prices for all candidates in parallel (batch)
                 if transfer_candidates:
                     price_tasks = [
-                        self._get_transaction_price_simple(candidate["tx_hash"], candidate["from_addr"])
+                        self._get_transaction_price_simple(candidate["tx_hash"], candidate["from_addr"], candidate["to_addr"])
                         for candidate in transfer_candidates
                     ]
                     price_results = await asyncio.gather(*price_tasks, return_exceptions=True)

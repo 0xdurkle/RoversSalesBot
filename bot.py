@@ -356,9 +356,10 @@ async def process_webhook_events_grouped(tx_hash: str, events: List[dict]):
             logger.debug(f"No valid token IDs in {tx_hash}")
             return
         
-        # Get price (pass seller address for better WETH detection)
+        # Get price (pass seller and buyer addresses for better WETH detection)
         seller_addr = list(sellers)[0] if sellers else None
-        price, is_weth = await sales_fetcher._get_transaction_price_simple(tx_hash, seller_addr)
+        buyer_addr = list(buyers)[0] if buyers else None
+        price, is_weth = await sales_fetcher._get_transaction_price_simple(tx_hash, seller_addr, buyer_addr)
         
         # Create sale event
         sale = SaleEvent(
