@@ -2,6 +2,8 @@
 
 A Discord bot that monitors NFT sales for a specific Ethereum NFT collection and posts real-time sale notifications to a Discord channel.
 
+**Latest Update**: Now uses IPFS direct image fetching for more reliable image display.
+
 ## Features
 
 - ✅ Real-time NFT sale monitoring via Alchemy webhooks
