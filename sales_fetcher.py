@@ -395,32 +395,70 @@ class SalesFetcher:
                     original_url = top_image.get("originalUrl")
                     png_url = top_image.get("pngUrl")
                     thumbnail_url = top_image.get("thumbnailUrl")
+                    content_type = top_image.get("contentType", "")
+                    
+                    # Check if originalUrl indicates it's a video (to know if cachedUrl is also video)
+                    is_video = False
+                    if original_url and isinstance(original_url, str):
+                        is_video = any(ext in original_url.lower() for ext in ['.mp4', '.webm', '.mov', '.avi', 'video'])
+                    if content_type and "video" in content_type.lower():
+                        is_video = True
                     
                     logger.info(f"🔍 Checking top-level image FIRST (most reliable source):")
                     logger.info(f"🔍   cachedUrl: {repr(cached_url)} (type: {type(cached_url).__name__})")
                     logger.info(f"🔍   originalUrl: {original_url[:100] if original_url else 'None'}...")
+                    logger.info(f"🔍   pngUrl: {png_url[:100] if png_url else 'None'}...")
+                    logger.info(f"🔍   thumbnailUrl: {thumbnail_url[:100] if thumbnail_url else 'None'}...")
                     
+                    # Helper function to check if URL is a video
+                    def is_video_url(url: str) -> bool:
+                        if not url:
+                            return False
+                        url_lower = url.lower()
+                        return any(ext in url_lower for ext in ['.mp4', '.webm', '.mov', '.avi', 'video'])
+                    
+                    # Check cachedUrl - but skip if it's a video file
                     if cached_url and isinstance(cached_url, str) and cached_url.strip():
-                        image_url = cached_url.strip()
-                        logger.info(f"✅ FOUND cachedUrl in top-level image (Alchemy CDN): {image_url}")
+                        if is_video or is_video_url(cached_url):
+                            logger.warning(f"⚠️ cachedUrl is a video file (detected from originalUrl/contentType), skipping: {cached_url[:80]}...")
+                            logger.info(f"⚠️ Will look for PNG/thumbnail instead for still image")
+                            # Don't use video URL - look for thumbnail/preview instead
+                        else:
+                            image_url = cached_url.strip()
+                            logger.info(f"✅ FOUND cachedUrl in top-level image (Alchemy CDN): {image_url}")
+                    # Check originalUrl - but skip if it's a video file
                     elif original_url and isinstance(original_url, str) and original_url.strip():
-                        if "nft-cdn.alchemy.com" in original_url:
+                        if is_video_url(original_url):
+                            logger.warning(f"⚠️ originalUrl is a video file, skipping: {original_url[:80]}...")
+                            # Don't use video URL - look for thumbnail/preview instead
+                        elif "nft-cdn.alchemy.com" in original_url:
                             image_url = original_url.strip()
                             logger.info(f"✅ FOUND originalUrl in top-level image (Alchemy CDN): {image_url[:80]}...")
                         else:
-                            # Store as potential fallback
+                            # Store as potential fallback (only if not video)
                             if not image_url:
                                 image_url = original_url.strip()
                                 logger.info(f"Found originalUrl in top-level (not Alchemy CDN): {image_url[:80]}...")
-                    elif png_url and isinstance(png_url, str) and png_url.strip():
-                        # Store Cloudinary as fallback
-                        cloudinary_url = png_url.strip()
-                        logger.info(f"Found Cloudinary PNG in top-level (will use as fallback): {cloudinary_url[:60]}...")
-                    elif thumbnail_url and isinstance(thumbnail_url, str) and thumbnail_url.strip():
-                        # Store Cloudinary as fallback
-                        if not cloudinary_url:
-                            cloudinary_url = thumbnail_url.strip()
-                            logger.info(f"Found Cloudinary thumbnail in top-level (will use as fallback): {cloudinary_url[:60]}...")
+                    
+                    # If we don't have an image yet (or skipped video URLs), prefer PNG/thumbnail
+                    if not image_url:
+                        if png_url and isinstance(png_url, str) and png_url.strip():
+                            # PNG URLs are usually still images, not videos
+                            image_url = png_url.strip()
+                            logger.info(f"✅ FOUND pngUrl in top-level (using as image): {image_url[:60]}...")
+                        elif thumbnail_url and isinstance(thumbnail_url, str) and thumbnail_url.strip():
+                            # Thumbnail URLs are usually still images, not videos
+                            image_url = thumbnail_url.strip()
+                            logger.info(f"✅ FOUND thumbnailUrl in top-level (using as image): {image_url[:60]}...")
+                        else:
+                            # Store Cloudinary URLs as fallback if we still don't have anything
+                            if png_url and isinstance(png_url, str) and png_url.strip():
+                                cloudinary_url = png_url.strip()
+                                logger.info(f"Found Cloudinary PNG in top-level (will use as fallback): {cloudinary_url[:60]}...")
+                            elif thumbnail_url and isinstance(thumbnail_url, str) and thumbnail_url.strip():
+                                if not cloudinary_url:
+                                    cloudinary_url = thumbnail_url.strip()
+                                    logger.info(f"Found Cloudinary thumbnail in top-level (will use as fallback): {cloudinary_url[:60]}...")
                 
                 # If we found Alchemy CDN URL in top-level, use it and skip other sources
                 if image_url and "nft-cdn.alchemy.com" in image_url:
