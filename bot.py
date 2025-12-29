@@ -4,6 +4,7 @@ Monitors NFT sales via Alchemy webhooks and posts to Discord.
 """
 import asyncio
 import io
+import json
 import logging
 import os
 import signal
@@ -616,8 +617,31 @@ async def process_webhook_sale_with_timeout(tx_hash: str, event: dict):
 
 async def handle_alchemy_webhook(request: web.Request) -> web.Response:
     """
-    Handle incoming Alchemy webhook.
+    Handle incoming Alchemy webhook for NFT transfers.
     CRITICAL: Always returns 200 OK (except auth failures).
+    
+    Alchemy NFT Activity webhook format:
+    {
+        "webhookId": "...",
+        "id": "...",
+        "createdAt": "...",
+        "type": "NFT_ACTIVITY",
+        "event": {
+            "network": "ETH_MAINNET",
+            "activity": [
+                {
+                    "fromAddress": "0x...",
+                    "toAddress": "0x...",
+                    "contractAddress": "0x...",
+                    "blockNum": "0x...",
+                    "hash": "0x...",  # transaction hash
+                    "erc721TokenId": "...",
+                    "category": "erc721",
+                    "log": {...}
+                }
+            ]
+        }
+    }
     
     Args:
         request: aiohttp request object
@@ -627,7 +651,6 @@ async def handle_alchemy_webhook(request: web.Request) -> web.Response:
     """
     # Log that we received a request (even if it's not a valid webhook)
     logger.info(f"Webhook endpoint hit: {request.method} {request.path} from {request.remote}")
-    logger.info(f"Request headers: {dict(request.headers)}")
     
     # Optional webhook authentication
     if WEBHOOK_SECRET:
@@ -640,52 +663,70 @@ async def handle_alchemy_webhook(request: web.Request) -> web.Response:
         # Parse JSON payload
         data = await request.json()
         webhook_id = data.get('webhookId', 'unknown')
-        logger.info(f"✅ Received webhook from Alchemy: {webhook_id}")
+        webhook_type = data.get('type', 'unknown')
+        logger.info(f"✅ Received webhook from Alchemy: {webhook_id}, type: {webhook_type}")
         
-        # Alchemy can send events in two formats:
-        # 1. Array format: {"activity": [event1, event2, ...]}
-        # 2. Single event format: {event data at top level}
+        # Log full payload for debugging (truncated)
+        payload_str = json.dumps(data)[:500]
+        logger.info(f"📦 Webhook payload (first 500 chars): {payload_str}")
         
         events_to_process = []
         
-        # Check for activity array first
-        activity = data.get("activity", [])
-        if activity:
-            events_to_process = activity
-        else:
-            # Check if this is a single event at top level
-            event_type = data.get("type", "")
-            if event_type == "NFT_ACTIVITY":
-                events_to_process = [data]
+        # Alchemy NFT Activity webhook format has nested structure:
+        # data.event.activity[] contains the actual transfer events
+        if webhook_type == "NFT_ACTIVITY":
+            event_data = data.get("event", {})
+            activity = event_data.get("activity", [])
+            if activity:
+                events_to_process = activity
+                logger.info(f"Found {len(activity)} activity event(s) in NFT_ACTIVITY webhook")
+        
+        # Also check for legacy/alternative formats
+        # Format 1: activity at top level
+        if not events_to_process:
+            activity = data.get("activity", [])
+            if activity:
+                events_to_process = activity
+                logger.info(f"Found {len(activity)} event(s) in top-level activity array")
+        
+        # Format 2: Single event at top level with contractAddress
+        if not events_to_process and data.get("contractAddress"):
+            events_to_process = [data]
+            logger.info("Processing single event from top-level data")
         
         if not events_to_process:
-            logger.debug("No events found in webhook payload")
+            logger.warning(f"No events found in webhook payload. Keys: {list(data.keys())}")
             return web.Response(status=200, text="OK")
         
         logger.info(f"Processing {len(events_to_process)} event(s) from webhook")
         
         # Process events asynchronously (fire-and-forget)
         for event in events_to_process:
-            # Check event type - Alchemy uses "type": "NFT_ACTIVITY"
-            event_type = event.get("type", "")
-            if event_type != "NFT_ACTIVITY":
-                logger.debug(f"Skipping event type: {event_type}")
-                continue
-            
-            # Get transaction hash (can be "transactionHash" or "hash")
-            tx_hash = event.get("transactionHash") or event.get("hash", "")
+            # Get transaction hash (different field names in different formats)
+            tx_hash = (
+                event.get("hash") or 
+                event.get("transactionHash") or 
+                event.get("log", {}).get("transactionHash", "")
+            )
             if not tx_hash:
-                logger.warning("Event missing transaction hash, skipping")
+                logger.warning(f"Event missing transaction hash, skipping. Event keys: {list(event.keys())}")
                 continue
             
-            # Get contract address from log.address
-            log_data = event.get("log", {})
-            contract_address = log_data.get("address", "").lower()
+            # Get contract address (different field names in different formats)
+            contract_address = (
+                event.get("contractAddress", "").lower() or
+                event.get("rawContract", {}).get("address", "").lower() or
+                event.get("log", {}).get("address", "").lower()
+            )
+            
+            logger.info(f"📝 Event: tx={tx_hash[:16]}..., contract={contract_address[:16] if contract_address else 'None'}...")
             
             # Verify it's for our contract
             if contract_address != NFT_CONTRACT_ADDRESS:
-                logger.debug(f"Event for different contract: {contract_address}, skipping")
+                logger.debug(f"Event for different contract: {contract_address}, expected: {NFT_CONTRACT_ADDRESS}, skipping")
                 continue
+            
+            logger.info(f"✅ Processing sale event for tx {tx_hash[:16]}...")
             
             # Create async task for processing (don't await)
             asyncio.create_task(process_webhook_sale_with_timeout(tx_hash, event))
@@ -878,7 +919,6 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
 
 async def health_check(request: web.Request) -> web.Response:
     """Health check endpoint for Railway/webhook monitoring."""
-    import json
     status = {
         "status": "healthy" if client.is_ready() else "degraded",
         "discord_connected": client.is_ready(),
