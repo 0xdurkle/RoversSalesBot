@@ -152,16 +152,20 @@ def create_sale_embed(sale: SaleEvent, image_urls: List[str]) -> discord.Embed:
     )
     
     # Add first image if available
-    if image_urls:
+    if image_urls and len(image_urls) > 0:
         try:
             image_url = image_urls[0]
+            logger.info(f"🔍 Processing image URL: {image_url[:100] if image_url else 'None'}...")
+            
             # Ensure URL is complete and valid
-            if not image_url.startswith(("http://", "https://")):
-                logger.warning(f"Invalid image URL format: {image_url[:50]}...")
+            if not image_url or not isinstance(image_url, str):
+                logger.error(f"✗ Invalid image URL: {type(image_url)} - {image_url}")
+            elif not image_url.startswith(("http://", "https://")):
+                logger.warning(f"✗ Invalid image URL format (doesn't start with http/https): {image_url[:100]}...")
             else:
                 # Validate URL length (Discord has limits)
                 if len(image_url) > 2000:
-                    logger.warning(f"Image URL too long ({len(image_url)} chars), truncating to 2000")
+                    logger.warning(f"⚠ Image URL too long ({len(image_url)} chars), truncating to 2000")
                     image_url = image_url[:2000]
                 
                 # Clean URL - remove any trailing issues
@@ -169,35 +173,46 @@ def create_sale_embed(sale: SaleEvent, image_urls: List[str]) -> discord.Embed:
                 
                 # Quick validation: Check if URL looks valid
                 if not image_url.startswith(("http://", "https://")):
-                    logger.error(f"✗ Invalid image URL format (doesn't start with http/https): {image_url[:100]}...")
+                    logger.error(f"✗ Invalid image URL format after cleaning: {image_url[:100]}...")
                 elif "cloudinary.com" in image_url:
                     logger.warning(f"⚠ Using Cloudinary URL (may return 400): {image_url[:100]}...")
                     logger.warning("⚠ Discord may not be able to fetch this URL - Cloudinary URLs often fail")
                 elif "nft-cdn.alchemy.com" in image_url:
                     logger.info(f"✓ Using Alchemy CDN URL (should work): {image_url[:100]}...")
+                else:
+                    logger.info(f"ℹ Using other URL source: {image_url[:100]}...")
                 
                 # Log the FULL URL before setting (for debugging)
                 logger.info(f"🔍 FULL IMAGE URL (before setting): {image_url}")
+                logger.info(f"🔍 URL length: {len(image_url)} chars")
                 
                 # Set embed image
-                embed.set_image(url=image_url)
-                logger.info(f"✓ Set embed image URL: {image_url[:100]}... (length: {len(image_url)} chars)")
+                try:
+                    embed.set_image(url=image_url)
+                    logger.info(f"✓ Called embed.set_image() with URL: {image_url[:100]}...")
+                except Exception as set_error:
+                    logger.error(f"✗ Error calling embed.set_image(): {set_error}", exc_info=True)
+                    raise
                 
                 # Verify it was set correctly
-                if embed.image and embed.image.url:
-                    logger.info(f"✓ Embed image verified: {embed.image.url[:100]}...")
-                    # Log the full URL for debugging - USER CAN TEST THIS IN BROWSER
-                    logger.info(f"🔍 FULL EMBED IMAGE URL (copy this and test in browser):")
-                    logger.info(f"🔍 {embed.image.url}")
-                    logger.info(f"✓ Discord should fetch this URL when displaying the embed")
-                    logger.info(f"💡 TIP: Copy the URL above and open it in your browser to verify it works")
+                if embed.image:
+                    if embed.image.url:
+                        logger.info(f"✓ Embed image verified: {embed.image.url[:100]}...")
+                        logger.info(f"🔍 FULL EMBED IMAGE URL (copy this and test in browser):")
+                        logger.info(f"🔍 {embed.image.url}")
+                        logger.info(f"✓ Discord should fetch this URL when displaying the embed")
+                        logger.info(f"💡 TIP: Copy the URL above and open it in your browser to verify it works")
+                    else:
+                        logger.error("✗ embed.image exists but embed.image.url is None")
                 else:
-                    logger.error("✗ Failed to set embed image - embed.image is None or has no URL")
+                    logger.error("✗ embed.image is None after calling set_image()")
                     logger.error(f"✗ Attempted URL was: {image_url[:200]}")
         except Exception as e:
-            logger.error(f"Error setting embed image: {e}", exc_info=True)
+            logger.error(f"✗ Error setting embed image: {e}", exc_info=True)
+            logger.error(f"✗ Image URL that failed: {image_urls[0][:200] if image_urls and len(image_urls) > 0 else 'No URLs'}")
     else:
-        logger.warning("No images available for embed")
+        logger.warning(f"⚠ No images available for embed (image_urls: {image_urls})")
+        logger.warning(f"⚠ This means fetch_nft_images() returned empty list or None")
     
     # Add transaction link
     tx_url = f"https://etherscan.io/tx/{sale.tx_hash}"
@@ -239,6 +254,15 @@ def create_sale_embed(sale: SaleEvent, image_urls: List[str]) -> discord.Embed:
             )
     
     embed.set_footer(text="NFT Sales Monitor")
+    
+    # Final embed status log
+    if embed.image and embed.image.url:
+        logger.info(f"✅ EMBED CREATED SUCCESSFULLY with image URL: {embed.image.url[:100]}...")
+    else:
+        logger.error(f"❌ EMBED CREATED BUT NO IMAGE - embed.image: {embed.image}")
+        logger.error(f"❌ image_urls passed to function: {len(image_urls) if image_urls else 0} URL(s)")
+        if image_urls:
+            logger.error(f"❌ First image_url was: {image_urls[0][:200] if image_urls[0] else 'None'}")
     
     return embed
 
@@ -344,7 +368,12 @@ async def process_webhook_events_grouped(tx_hash: str, events: List[dict]):
         
         # Fetch images (limit to 20) - this gets the embed image URL
         image_urls = await sales_fetcher.fetch_nft_images(token_ids, max_images=20)
-        logger.info(f"Fetched {len(image_urls)} image(s) for webhook sale")
+        logger.info(f"📸 Fetched {len(image_urls)} image(s) for webhook sale")
+        if image_urls:
+            logger.info(f"📸 First image URL: {image_urls[0][:150]}...")
+        else:
+            logger.error(f"❌ NO IMAGE URLS RETURNED for token IDs: {token_ids}")
+            logger.error(f"❌ This means fetch_nft_images() returned empty list - check Alchemy API responses")
         
         # Create embed with the image URL
         embed = create_sale_embed(sale, image_urls)
@@ -639,7 +668,12 @@ async def lastsale(interaction: discord.Interaction):
         
         # Fetch images - this gets the embed image URL (only 1 API call per token)
         image_urls = await sales_fetcher.fetch_nft_images(token_ids, max_images=20)
-        logger.info(f"Fetched {len(image_urls)} image(s) for /lastsale command")
+        logger.info(f"📸 Fetched {len(image_urls)} image(s) for /lastsale command")
+        if image_urls:
+            logger.info(f"📸 First image URL: {image_urls[0][:150]}...")
+        else:
+            logger.error(f"❌ NO IMAGE URLS RETURNED for token IDs: {token_ids}")
+            logger.error(f"❌ This means fetch_nft_images() returned empty list - check Alchemy API responses")
         
         # Create embed with the image URL
         embed = create_sale_embed(sale, image_urls)
