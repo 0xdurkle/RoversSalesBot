@@ -335,6 +335,16 @@ class SalesFetcher:
                     # Event signature hash: keccak256("Transfer(address,address,uint256)") = 0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef
                     transfer_event_topic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
                     
+                    # Log all unique contract addresses in the logs to help debug
+                    unique_contracts = set()
+                    for log in logs:
+                        log_addr = log.get("address", "").lower()
+                        if log_addr:
+                            unique_contracts.add(log_addr)
+                    logger.info(f"🔍 Strategy 0: Unique contract addresses in logs: {len(unique_contracts)}")
+                    if unique_contracts:
+                        logger.info(f"🔍 Strategy 0: Contract addresses: {', '.join([addr[:10] + '...' for addr in list(unique_contracts)[:5]])}...")
+                    
                     weth_logs_found = 0
                     for i, log in enumerate(logs):
                         log_address = log.get("address", "").lower()
