@@ -66,7 +66,8 @@ DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 DISCORD_CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID", "0"))
 NFT_CONTRACT_ADDRESS = os.getenv("NFT_CONTRACT_ADDRESS", "").lower()
 ALCHEMY_API_KEY = os.getenv("ALCHEMY_API_KEY")
-WEBHOOK_PORT = int(os.getenv("WEBHOOK_PORT", "8080"))
+# Railway provides PORT env var, use that if available, otherwise default to 8080
+WEBHOOK_PORT = int(os.getenv("PORT") or os.getenv("WEBHOOK_PORT", "8080"))
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 
 # Discord client setup
