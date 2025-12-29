@@ -317,6 +317,46 @@ class SalesFetcher:
             weth_total = 0
             transfers_list = []
             
+            # Strategy 0: Check transaction receipt logs for WETH transfers in the SAME transaction
+            # This is the most reliable - WETH transfers in the same tx will be in the logs
+            logger.info(f"🔍 Strategy 0: Checking transaction receipt logs for WETH transfers in same tx {tx_hash[:16]}...")
+            try:
+                receipt = await self.get_transaction_receipt(tx_hash)
+                if receipt and receipt.get("logs"):
+                    logs = receipt.get("logs", [])
+                    weth_contract_lower = WETH_CONTRACT.lower()
+                    # WETH Transfer event signature: Transfer(address indexed from, address indexed to, uint256 value)
+                    # Event signature hash: keccak256("Transfer(address,address,uint256)") = 0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef
+                    transfer_event_topic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+                    
+                    for log in logs:
+                        # Check if this is a WETH contract log
+                        log_address = log.get("address", "").lower()
+                        if log_address == weth_contract_lower:
+                            # Check if this is a Transfer event
+                            topics = log.get("topics", [])
+                            if topics and len(topics) >= 3 and topics[0].lower() == transfer_event_topic:
+                                # Extract from, to, and value from log
+                                from_addr = "0x" + topics[1][-40:] if len(topics[1]) >= 42 else topics[1]
+                                to_addr = "0x" + topics[2][-40:] if len(topics[2]) >= 42 else topics[2]
+                                value_hex = log.get("data", "0x0")
+                                
+                                # Check if this transfer is to the seller
+                                if seller_lower and to_addr.lower() == seller_lower:
+                                    try:
+                                        weth_amount = int(value_hex, 16) if value_hex != "0x0" else 0
+                                        if weth_amount > 0:
+                                            weth_total += weth_amount
+                                            logger.info(f"✅ Found WETH in same tx (from logs): {weth_amount / (10**18):.6f} WETH to seller {seller_lower[:10]}...")
+                                    except (ValueError, TypeError):
+                                        pass
+            except Exception as e:
+                logger.debug(f"Could not check transaction receipt for WETH: {e}")
+            
+            if weth_total > 0:
+                logger.info(f"✅ Found WETH transfer in same transaction: {weth_total / (10**18):.6f} WETH for tx {tx_hash[:16]}...")
+                return (weth_total, True)
+            
             # Strategy 1: If we have buyer and seller addresses, query WETH transfers directly by addresses
             # This is the most reliable method - query transfers from buyer to seller with wide block range
             if buyer_lower and seller_lower:
