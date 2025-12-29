@@ -538,6 +538,7 @@ async def start_webhook_server():
     site = web.TCPSite(runner, "0.0.0.0", WEBHOOK_PORT)
     await site.start()
     logger.info(f"Webhook server started on port {WEBHOOK_PORT}")
+    logger.info("IPFS image fetching enabled - prioritizing direct IPFS URLs")
 
 
 async def main():
