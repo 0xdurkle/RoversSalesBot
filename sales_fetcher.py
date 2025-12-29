@@ -405,13 +405,41 @@ class SalesFetcher:
                     to_block=hex(direct_to_block)
                 )
                 direct_list = direct_transfers.get("transfers", [])
-                logger.info(f"🔍 Found {len(direct_list)} WETH transfer(s) from buyer to seller in blocks {direct_from_block}-{direct_to_block}")
+                logger.info(f"🔍 Strategy 1: Found {len(direct_list)} WETH transfer(s) from buyer to seller in blocks {direct_from_block}-{direct_to_block}")
                 
                 # Add all direct transfers to the list
                 for direct_transfer in direct_list:
                     direct_hash = direct_transfer.get("hash", "")
                     transfers_list.append(direct_transfer)
                     logger.debug(f"➕ Found WETH transfer: {direct_hash[:16]}... from {buyer_lower[:10]}... to {seller_lower[:10]}...")
+                
+                # Strategy 1b: If no direct buyer->seller WETH found, check for ANY WETH transfers from buyer
+                # (WETH might go to marketplace/intermediary contract, not directly to seller)
+                if len(direct_list) == 0:
+                    logger.info(f"🔍 Strategy 1b: No direct buyer->seller WETH found, checking ANY WETH transfers from buyer {buyer_lower[:10]}...")
+                    buyer_weth_transfers = await self.get_asset_transfers(
+                        contract_address=WETH_CONTRACT,
+                        category=["erc20"],
+                        from_address=buyer_lower,
+                        from_block=hex(direct_from_block),
+                        to_block=hex(direct_to_block)
+                    )
+                    buyer_list = buyer_weth_transfers.get("transfers", [])
+                    logger.info(f"🔍 Strategy 1b: Found {len(buyer_list)} WETH transfer(s) FROM buyer in blocks {direct_from_block}-{direct_to_block}")
+                    if buyer_list:
+                        for transfer in buyer_list[:3]:  # Log first 3
+                            transfer_to = transfer.get("to", "")
+                            transfer_value = transfer.get("value", "0x0")
+                            transfer_hash = transfer.get("hash", "")
+                            try:
+                                value_wei = int(transfer_value, 16) if transfer_value != "0x0" else 0
+                                logger.info(f"🔍 Strategy 1b: WETH transfer from buyer to {transfer_to[:10]}...: {value_wei / (10**18):.6f} WETH (tx: {transfer_hash[:16]}...)")
+                                # If WETH goes to seller OR if it's in the same block, count it
+                                if transfer_to.lower() == seller_lower:
+                                    transfers_list.append(transfer)
+                                    logger.info(f"✅ Strategy 1b: Found WETH transfer to seller via intermediary!")
+                            except:
+                                pass
             
             # Strategy 2: Also check block range around the transaction (in case addresses don't match exactly)
             # Check from block-20 to block+20 to catch WETH transfers
