@@ -3,17 +3,27 @@ NFT Sales Discord Bot - Main entry point.
 Monitors NFT sales via Alchemy webhooks and posts to Discord.
 """
 import asyncio
+import io
 import logging
 import os
+import signal
 import ssl
-from collections import defaultdict
+import warnings
+from collections import OrderedDict, defaultdict
 from decimal import Decimal
 from typing import Dict, List, Optional
 
 import aiohttp
-from aiohttp import web
 import certifi
-import ssl
+import discord
+from aiohttp import web
+from discord import app_commands
+from dotenv import load_dotenv
+
+from sales_fetcher import SalesFetcher, SaleEvent
+
+# Load environment variables
+load_dotenv()
 
 # Patch aiohttp.TCPConnector to use certifi by default
 _original_tcp_connector_init = aiohttp.TCPConnector.__init__
@@ -28,20 +38,6 @@ def _new_tcp_connector_init(self, *args, **kwargs):
 
 aiohttp.TCPConnector.__init__ = _new_tcp_connector_init
 
-import discord
-from discord import app_commands
-from dotenv import load_dotenv
-
-from sales_fetcher import SalesFetcher, SaleEvent
-import io
-
-# Load environment variables
-load_dotenv()
-
-# Configure SSL certificates before importing discord
-import certifi
-import ssl
-
 # Set default SSL context for asyncio
 # Note: For production, ensure proper SSL certificates are installed
 # This is a workaround for macOS SSL certificate issues
@@ -50,7 +46,6 @@ try:
 except Exception:
     # Fallback: disable SSL verification (NOT RECOMMENDED FOR PRODUCTION)
     # This is only for local testing when certificates aren't properly configured
-    import warnings
     warnings.warn("SSL verification disabled - not recommended for production")
     ssl._create_default_https_context = ssl._create_unverified_context
 
@@ -82,6 +77,10 @@ ALCHEMY_API_KEY = os.getenv("ALCHEMY_API_KEY")
 WEBHOOK_PORT = int(os.getenv("PORT") or os.getenv("WEBHOOK_PORT", "8080"))
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 
+# Memory management constants
+MAX_PROCESSED_SALES = 10000  # Maximum number of processed tx hashes to keep
+WEBHOOK_EVENT_TIMEOUT = 60  # Seconds before orphaned webhook events are cleaned up
+
 # Discord client setup
 intents = discord.Intents.default()
 intents.message_content = True
@@ -91,8 +90,9 @@ tree = app_commands.CommandTree(client)
 # Global state
 sales_fetcher: Optional[SalesFetcher] = None
 discord_channel: Optional[discord.TextChannel] = None
-processed_sales: set = set()  # Track processed transaction hashes
+processed_sales: OrderedDict = OrderedDict()  # Track processed tx hashes with LRU eviction
 webhook_events: Dict[str, List[dict]] = defaultdict(list)  # Group events by tx_hash
+shutdown_event: asyncio.Event = None  # For graceful shutdown
 
 
 def format_price(price_wei: int, is_weth: bool) -> str:
@@ -285,6 +285,94 @@ def create_sale_embed(sale: SaleEvent, image_urls: List[str]) -> discord.Embed:
     return embed
 
 
+async def get_image_file_for_sale(
+    sales_fetcher: SalesFetcher,
+    token_ids: List[str],
+    image_urls: List[str],
+    sale: SaleEvent
+) -> tuple[Optional[discord.File], Optional[bytes]]:
+    """
+    Get image file for a sale, handling both regular images and video NFTs.
+    
+    Args:
+        sales_fetcher: SalesFetcher instance
+        token_ids: List of token IDs
+        image_urls: List of image URLs from fetch_nft_images
+        sale: SaleEvent object
+        
+    Returns:
+        Tuple of (discord.File or None, image_data bytes or None)
+    """
+    file = None
+    image_data = None
+    
+    if not token_ids or not image_urls:
+        return None, None
+    
+    embed_url = image_urls[0]
+    is_cloudinary = 'cloudinary.com' in embed_url
+    
+    # For video NFTs (Cloudinary URLs indicate video), always extract frame from video
+    if is_cloudinary and token_ids:
+        logger.info(f"🎬 Video NFT detected - extracting frame from video (most reliable method)...")
+        try:
+            # Get video URL from metadata
+            metadata = await sales_fetcher.get_nft_metadata(token_ids[0])
+            if metadata:
+                top_image = metadata.get("image", {})
+                if isinstance(top_image, dict):
+                    original_url = top_image.get("originalUrl", "")
+                    if original_url and '/ipfs/' in original_url and ('.mp4' in original_url.lower() or 'video' in original_url.lower()):
+                        logger.info(f"🎬 Found video URL: {original_url[:80]}...")
+                        # Extract frame from video
+                        frame_data = await sales_fetcher.extract_video_frame(original_url, token_ids[0])
+                        if frame_data:
+                            file = discord.File(
+                                io.BytesIO(frame_data),
+                                filename=f"nft_{sale.token_id or 'image'}.png"
+                            )
+                            image_data = frame_data
+                            logger.info(f"✅ Successfully extracted frame from video: {len(frame_data)} bytes")
+                        else:
+                            logger.error(f"❌ Frame extraction failed - no image will be shown")
+                    else:
+                        logger.error(f"❌ No video URL found in metadata - originalUrl: {original_url[:100] if original_url else 'None'}...")
+                else:
+                    logger.error(f"❌ Image metadata is not a dict: {type(top_image)}")
+            else:
+                logger.error(f"❌ Could not fetch metadata for video extraction")
+        except Exception as video_error:
+            logger.error(f"❌ Video frame extraction failed: {video_error}", exc_info=True)
+    else:
+        # For non-video NFTs, try downloading the image URL
+        logger.info(f"📥 Attempting to download image: {embed_url[:80]}...")
+        image_data = await sales_fetcher.download_image(embed_url)
+        if image_data:
+            ext = "png"
+            url_lower = embed_url.lower()
+            if ".jpg" in url_lower or ".jpeg" in url_lower:
+                ext = "jpg"
+            elif ".gif" in url_lower:
+                ext = "gif"
+            elif ".webp" in url_lower:
+                ext = "webp"
+            
+            file = discord.File(
+                io.BytesIO(image_data),
+                filename=f"nft_{sale.token_id or 'image'}.{ext}"
+            )
+            logger.info(f"✅ Successfully downloaded image: {len(image_data)} bytes")
+    
+    if not image_data:
+        if is_cloudinary:
+            logger.error(f"❌ CRITICAL: Video frame extraction failed - Discord won't be able to display image!")
+            logger.error(f"❌ Video NFT detected but frame extraction failed")
+        else:
+            logger.debug(f"Could not download image from embed URL (may be too large)")
+    
+    return file, image_data
+
+
 async def process_webhook_events_grouped(tx_hash: str, events: List[dict]):
     """
     Process grouped webhook events for a transaction.
@@ -296,7 +384,8 @@ async def process_webhook_events_grouped(tx_hash: str, events: List[dict]):
     """
     try:
         # Check if already processed
-        if tx_hash.lower() in processed_sales:
+        tx_hash_lower = tx_hash.lower()
+        if tx_hash_lower in processed_sales:
             logger.debug(f"Sale {tx_hash} already processed, skipping")
             return
         
@@ -398,70 +487,8 @@ async def process_webhook_events_grouped(tx_hash: str, events: List[dict]):
         # Create embed with the image URL
         embed = create_sale_embed(sale, image_urls)
         
-        # Always extract frame from video for video NFTs (MOST RELIABLE - Cloudinary URLs don't work)
-        file = None
-        image_data = None
-        if token_ids and len(token_ids) > 0 and image_urls:
-            embed_url = image_urls[0]
-            is_cloudinary = 'cloudinary.com' in embed_url
-            
-            # For video NFTs (Cloudinary URLs indicate video), always extract frame from video
-            if is_cloudinary and token_ids:
-                logger.info(f"🎬 Video NFT detected - extracting frame from video (most reliable method)...")
-                try:
-                    # Get video URL from metadata
-                    metadata = await sales_fetcher.get_nft_metadata(token_ids[0])
-                    if metadata:
-                        top_image = metadata.get("image", {})
-                        if isinstance(top_image, dict):
-                            original_url = top_image.get("originalUrl", "")
-                            if original_url and '/ipfs/' in original_url and ('.mp4' in original_url.lower() or 'video' in original_url.lower()):
-                                logger.info(f"🎬 Found video URL: {original_url[:80]}...")
-                                # Extract frame from video
-                                frame_data = await sales_fetcher.extract_video_frame(original_url, token_ids[0])
-                                if frame_data:
-                                    file = discord.File(
-                                        io.BytesIO(frame_data),
-                                        filename=f"nft_{sale.token_id or 'image'}.png"
-                                    )
-                                    image_data = frame_data
-                                    logger.info(f"✅ Successfully extracted frame from video: {len(frame_data)} bytes")
-                                else:
-                                    logger.error(f"❌ Frame extraction failed - no image will be shown")
-                            else:
-                                logger.error(f"❌ No video URL found in metadata - originalUrl: {original_url[:100] if original_url else 'None'}...")
-                        else:
-                            logger.error(f"❌ Image metadata is not a dict: {type(top_image)}")
-                    else:
-                        logger.error(f"❌ Could not fetch metadata for video extraction")
-                except Exception as video_error:
-                    logger.error(f"❌ Video frame extraction failed: {video_error}", exc_info=True)
-            else:
-                # For non-video NFTs, try downloading the image URL
-                logger.info(f"📥 Attempting to download image: {embed_url[:80]}...")
-                image_data = await sales_fetcher.download_image(embed_url)
-                if image_data:
-                    ext = "png"
-                    url_lower = embed_url.lower()
-                    if ".jpg" in url_lower or ".jpeg" in url_lower:
-                        ext = "jpg"
-                    elif ".gif" in url_lower:
-                        ext = "gif"
-                    elif ".webp" in url_lower:
-                        ext = "webp"
-                    
-                    file = discord.File(
-                        io.BytesIO(image_data),
-                        filename=f"nft_{sale.token_id or 'image'}.{ext}"
-                    )
-                    logger.info(f"✅ Successfully downloaded image: {len(image_data)} bytes")
-            
-            if not image_data:
-                if is_cloudinary:
-                    logger.error(f"❌ CRITICAL: Video frame extraction failed - Discord won't be able to display image!")
-                    logger.error(f"❌ Video NFT detected but frame extraction failed")
-                else:
-                    logger.debug(f"Could not download image from embed URL (may be too large)")
+        # Get image file (handles both regular images and video NFTs)
+        file, image_data = await get_image_file_for_sale(sales_fetcher, token_ids, image_urls, sale)
         
         # Get channel if not already set (in case it wasn't found at startup)
         global discord_channel
@@ -548,8 +575,11 @@ async def process_webhook_events_grouped(tx_hash: str, events: List[dict]):
         else:
             logger.error(f"Discord channel {DISCORD_CHANNEL_ID} not available - check bot is in server and has access")
         
-        # Mark as processed
-        processed_sales.add(tx_hash.lower())
+        # Mark as processed with LRU eviction
+        processed_sales[tx_hash_lower] = True
+        # Evict oldest entries if over limit
+        while len(processed_sales) > MAX_PROCESSED_SALES:
+            processed_sales.popitem(last=False)
         
     except Exception as e:
         logger.error(f"Error processing sale {tx_hash}: {e}", exc_info=True)
@@ -754,70 +784,8 @@ async def lastsale(interaction: discord.Interaction):
         embed = create_sale_embed(sale, image_urls)
         embed.set_footer(text=f"Requested by {interaction.user.display_name} | NFT Sales Monitor")
         
-        # Always extract frame from video for video NFTs (MOST RELIABLE - Cloudinary URLs don't work)
-        file = None
-        image_data = None
-        if token_ids and len(token_ids) > 0 and image_urls:
-            embed_url = image_urls[0]
-            is_cloudinary = 'cloudinary.com' in embed_url
-            
-            # For video NFTs (Cloudinary URLs indicate video), always extract frame from video
-            if is_cloudinary and token_ids:
-                logger.info(f"🎬 Video NFT detected - extracting frame from video (most reliable method)...")
-                try:
-                    # Get video URL from metadata
-                    metadata = await sales_fetcher.get_nft_metadata(token_ids[0])
-                    if metadata:
-                        top_image = metadata.get("image", {})
-                        if isinstance(top_image, dict):
-                            original_url = top_image.get("originalUrl", "")
-                            if original_url and '/ipfs/' in original_url and ('.mp4' in original_url.lower() or 'video' in original_url.lower()):
-                                logger.info(f"🎬 Found video URL: {original_url[:80]}...")
-                                # Extract frame from video
-                                frame_data = await sales_fetcher.extract_video_frame(original_url, token_ids[0])
-                                if frame_data:
-                                    file = discord.File(
-                                        io.BytesIO(frame_data),
-                                        filename=f"nft_{sale.token_id or 'image'}.png"
-                                    )
-                                    image_data = frame_data
-                                    logger.info(f"✅ Successfully extracted frame from video: {len(frame_data)} bytes")
-                                else:
-                                    logger.error(f"❌ Frame extraction failed - no image will be shown")
-                            else:
-                                logger.error(f"❌ No video URL found in metadata - originalUrl: {original_url[:100] if original_url else 'None'}...")
-                        else:
-                            logger.error(f"❌ Image metadata is not a dict: {type(top_image)}")
-                    else:
-                        logger.error(f"❌ Could not fetch metadata for video extraction")
-                except Exception as video_error:
-                    logger.error(f"❌ Video frame extraction failed: {video_error}", exc_info=True)
-            else:
-                # For non-video NFTs, try downloading the image URL
-                logger.info(f"📥 Attempting to download image: {embed_url[:80]}...")
-                image_data = await sales_fetcher.download_image(embed_url)
-                if image_data:
-                    ext = "png"
-                    url_lower = embed_url.lower()
-                    if ".jpg" in url_lower or ".jpeg" in url_lower:
-                        ext = "jpg"
-                    elif ".gif" in url_lower:
-                        ext = "gif"
-                    elif ".webp" in url_lower:
-                        ext = "webp"
-                    
-                    file = discord.File(
-                        io.BytesIO(image_data),
-                        filename=f"nft_{sale.token_id or 'image'}.{ext}"
-                    )
-                    logger.info(f"✅ Successfully downloaded image: {len(image_data)} bytes")
-            
-            if not image_data:
-                if is_cloudinary:
-                    logger.error(f"❌ CRITICAL: Video frame extraction failed - Discord won't be able to display image!")
-                    logger.error(f"❌ Video NFT detected but frame extraction failed")
-                else:
-                    logger.debug(f"Could not download image from embed URL (may be too large)")
+        # Get image file (handles both regular images and video NFTs)
+        file, image_data = await get_image_file_for_sale(sales_fetcher, token_ids, image_urls, sale)
         
         # Log image information for debugging
         if image_urls:
@@ -881,13 +849,48 @@ async def lastsale(interaction: discord.Interaction):
             # Try sending a generic message
             try:
                 await interaction.followup.send("Error fetching last sale. Please try again later.")
-            except:
-                pass
+            except Exception:
+                pass  # Last resort - nothing more we can do
+
+
+@tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    """Global error handler for application commands."""
+    logger.error(f"Command error in {interaction.command.name if interaction.command else 'unknown'}: {error}", exc_info=True)
+    
+    error_msg = "An error occurred while processing the command."
+    if isinstance(error, app_commands.CommandInvokeError):
+        if isinstance(error.original, asyncio.TimeoutError):
+            error_msg = "Request timed out. Please try again."
+        else:
+            error_msg = f"An error occurred: {str(error.original)[:100]}"
+    elif isinstance(error, app_commands.CheckFailure):
+        error_msg = "You don't have permission to use this command."
+    
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(error_msg, ephemeral=True)
+        else:
+            await interaction.response.send_message(error_msg, ephemeral=True)
+    except Exception as e:
+        logger.error(f"Failed to send error response: {e}")
 
 
 async def health_check(request: web.Request) -> web.Response:
     """Health check endpoint for Railway/webhook monitoring."""
-    return web.Response(text="OK", status=200)
+    import json
+    status = {
+        "status": "healthy" if client.is_ready() else "degraded",
+        "discord_connected": client.is_ready(),
+        "guilds": len(client.guilds) if client.is_ready() else 0,
+        "webhook_server": True,
+        "channel_found": discord_channel is not None
+    }
+    return web.Response(
+        text=json.dumps(status),
+        status=200,
+        content_type="application/json"
+    )
 
 async def webhook_test(request: web.Request) -> web.Response:
     """Test endpoint to verify webhook is accessible."""
@@ -918,9 +921,29 @@ async def start_webhook_server():
     logger.info("⚠️  For production, use your Railway/public URL: https://your-app.railway.app/webhook")
 
 
+async def graceful_shutdown(sig: signal.Signals):
+    """Handle graceful shutdown on SIGTERM/SIGINT."""
+    logger.info(f"Received exit signal {sig.name}...")
+    
+    # Close sales fetcher
+    if sales_fetcher:
+        logger.info("Closing sales fetcher...")
+        await sales_fetcher.close()
+    
+    # Close Discord client
+    if client and not client.is_closed():
+        logger.info("Closing Discord client...")
+        await client.close()
+    
+    logger.info("Shutdown complete.")
+
+
 async def main():
     """Main entry point."""
-    global sales_fetcher
+    global sales_fetcher, shutdown_event
+    
+    # Initialize shutdown event
+    shutdown_event = asyncio.Event()
     
     # Validate configuration
     if not DISCORD_BOT_TOKEN:
@@ -936,12 +959,22 @@ async def main():
         logger.error("ALCHEMY_API_KEY not set")
         return
     
+    # Set up signal handlers for graceful shutdown
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(
+            sig,
+            lambda s=sig: asyncio.create_task(graceful_shutdown(s))
+        )
+    
     # Start webhook server
     await start_webhook_server()
     
     # Start Discord bot (this will run until stopped)
     try:
         await client.start(DISCORD_BOT_TOKEN)
+    except asyncio.CancelledError:
+        logger.info("Bot task cancelled")
     finally:
         # Cleanup
         if sales_fetcher:

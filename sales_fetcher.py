@@ -4,11 +4,13 @@ Includes IPFS direct image fetching for improved reliability.
 """
 import asyncio
 import logging
+import os
 import ssl
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional, List, Tuple, Dict
 from decimal import Decimal
+from typing import Dict, List, Optional, Tuple
 
 import aiohttp
 import certifi
@@ -16,8 +18,12 @@ import certifi
 logger = logging.getLogger(__name__)
 
 # WETH contract address on Ethereum mainnet
-WETH_CONTRACT = "0xc02aa39b223fe8d0a0e5c4f27ead9083c756cc2"
+# WETH contract address (can be overridden via WETH_CONTRACT_ADDRESS env var)
+WETH_CONTRACT = os.environ.get("WETH_CONTRACT_ADDRESS", "0xc02aa39b223fe8d0a0e5c4f27ead9083c756cc2").lower()
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
+
+# Cache configuration
+MAX_METADATA_CACHE_SIZE = 1000  # Maximum number of cached metadata entries
 
 
 @dataclass
@@ -50,7 +56,7 @@ class SalesFetcher:
         self.rpc_url = f"https://eth-mainnet.g.alchemy.com/v2/{api_key}"
         self.nft_api_url = f"https://eth-mainnet.g.alchemy.com/nft/v3/{api_key}"
         self.session: Optional[aiohttp.ClientSession] = None
-        self._metadata_cache: Dict[str, dict] = {}  # Cache metadata to avoid duplicate API calls
+        self._metadata_cache: OrderedDict[str, dict] = OrderedDict()  # LRU cache for metadata
     
     async def _get_session(self) -> aiohttp.ClientSession:
         """Get or create HTTP session."""
@@ -227,7 +233,7 @@ class SalesFetcher:
     async def get_nft_metadata(self, token_id: str) -> dict:
         """
         Get NFT metadata including image.
-        Uses caching to avoid duplicate API calls.
+        Uses LRU caching to avoid duplicate API calls.
         
         Args:
             token_id: Token ID (hex or decimal string)
@@ -239,9 +245,11 @@ class SalesFetcher:
         if token_id.startswith("0x"):
             token_id = str(int(token_id, 16))
         
-        # Check cache first
+        # Check cache first (move to end for LRU)
         cache_key = f"{self.contract_address}:{token_id}"
         if cache_key in self._metadata_cache:
+            # Move to end (most recently used)
+            self._metadata_cache.move_to_end(cache_key)
             logger.debug(f"Using cached metadata for token {token_id}")
             return self._metadata_cache[cache_key]
         
@@ -251,9 +259,12 @@ class SalesFetcher:
         }
         metadata = await self._nft_api_call("getNFTMetadata", params)
         
-        # Cache the result
+        # Cache the result with LRU eviction
         if metadata:
             self._metadata_cache[cache_key] = metadata
+            # Evict oldest entries if over limit
+            while len(self._metadata_cache) > MAX_METADATA_CACHE_SIZE:
+                self._metadata_cache.popitem(last=False)
         
         return metadata
     
@@ -1186,6 +1197,32 @@ class SalesFetcher:
             logger.error(f"Error getting IPFS image URLs for token {token_id}: {e}")
             return []
     
+    async def get_ipfs_image_urls(self, token_id: str, timeout: float = 5.0) -> List[str]:
+        """
+        Get IPFS image URLs for a token with timeout protection.
+        
+        This is a wrapper around _get_ipfs_image_urls_internal that adds
+        timeout handling to prevent hanging on slow IPFS gateways.
+        
+        Args:
+            token_id: Token ID to get IPFS URLs for
+            timeout: Maximum seconds to wait (default 5.0)
+            
+        Returns:
+            List of IPFS image URLs, or empty list if timeout/error
+        """
+        try:
+            return await asyncio.wait_for(
+                self._get_ipfs_image_urls_internal(token_id),
+                timeout=timeout
+            )
+        except asyncio.TimeoutError:
+            logger.debug(f"IPFS fetch timed out for token {token_id} after {timeout}s")
+            return []
+        except Exception as e:
+            logger.debug(f"Error fetching IPFS URLs for token {token_id}: {e}")
+            return []
+    
     async def get_all_image_urls_for_token(self, token_id: str) -> List[str]:
         """
         Get all available image URLs for a token in priority order.
@@ -1419,10 +1456,12 @@ class SalesFetcher:
         Returns:
             PNG image bytes, or None if extraction fails
         """
+        temp_video_path: Optional[str] = None
+        temp_image_path: Optional[str] = None
+        
         try:
             import imageio
             import tempfile
-            import os
             
             logger.info(f"🎬 Extracting frame from video: {video_url[:80]}...")
             
@@ -1441,41 +1480,32 @@ class SalesFetcher:
                     logger.warning(f"Failed to download video: HTTP {response.status}")
                     return None
                 
-                # Download video to temp file
+                video_data = await response.read()
+                # Limit video size to 50MB to avoid memory issues
+                if len(video_data) > 50 * 1024 * 1024:
+                    logger.warning(f"Video too large ({len(video_data)} bytes), skipping frame extraction")
+                    return None
+                
+                # Write video to temp file
                 with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as temp_video:
-                    video_data = await response.read()
-                    # Limit video size to 50MB to avoid memory issues
-                    if len(video_data) > 50 * 1024 * 1024:
-                        logger.warning(f"Video too large ({len(video_data)} bytes), skipping frame extraction")
-                        return None
                     temp_video.write(video_data)
                     temp_video_path = temp_video.name
-                
-                try:
-                    # Extract first frame using imageio
-                    reader = imageio.get_reader(temp_video_path)
-                    frame = reader.get_data(0)  # Get first frame
-                    reader.close()
-                    
-                    # Convert frame to PNG bytes
-                    with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as temp_image:
-                        imageio.imwrite(temp_image.name, frame, format='PNG')
-                        with open(temp_image.name, 'rb') as f:
-                            image_bytes = f.read()
-                        os.unlink(temp_image.name)  # Clean up
-                    
-                    logger.info(f"✅ Successfully extracted frame: {len(image_bytes)} bytes")
-                    return image_bytes
-                    
-                except Exception as e:
-                    logger.error(f"Error extracting frame from video: {e}", exc_info=True)
-                    return None
-                finally:
-                    # Clean up temp video file
-                    try:
-                        os.unlink(temp_video_path)
-                    except:
-                        pass
+            
+            # Extract first frame using imageio
+            reader = imageio.get_reader(temp_video_path)
+            frame = reader.get_data(0)  # Get first frame
+            reader.close()
+            
+            # Convert frame to PNG bytes
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as temp_image:
+                temp_image_path = temp_image.name
+                imageio.imwrite(temp_image_path, frame, format='PNG')
+            
+            with open(temp_image_path, 'rb') as f:
+                image_bytes = f.read()
+            
+            logger.info(f"✅ Successfully extracted frame: {len(image_bytes)} bytes")
+            return image_bytes
                         
         except ImportError:
             logger.error("imageio not installed - cannot extract video frames. Install with: pip install imageio imageio-ffmpeg")
@@ -1483,6 +1513,18 @@ class SalesFetcher:
         except Exception as e:
             logger.error(f"Error in extract_video_frame: {e}", exc_info=True)
             return None
+        finally:
+            # Clean up temp files
+            if temp_video_path:
+                try:
+                    os.unlink(temp_video_path)
+                except OSError:
+                    pass
+            if temp_image_path:
+                try:
+                    os.unlink(temp_image_path)
+                except OSError:
+                    pass
     
     async def fetch_last_n_sales(self, n: int = 1) -> List[SaleEvent]:
         """
