@@ -446,8 +446,8 @@ async def process_webhook_events_grouped(tx_hash: str, events: List[dict]):
             
             if not image_data:
                 if is_cloudinary:
-                    logger.error(f"❌ CRITICAL: All image download attempts failed - Discord won't be able to display image!")
-                    logger.error(f"❌ Tried {len(urls_to_try)} Cloudinary URL(s) and IPFS fallback")
+                    logger.error(f"❌ CRITICAL: Video frame extraction failed - Discord won't be able to display image!")
+                    logger.error(f"❌ Video NFT detected but frame extraction failed")
                 else:
                     logger.debug(f"Could not download image from embed URL (may be too large)")
         
@@ -802,8 +802,8 @@ async def lastsale(interaction: discord.Interaction):
             
             if not image_data:
                 if is_cloudinary:
-                    logger.error(f"❌ CRITICAL: All image download attempts failed - Discord won't be able to display image!")
-                    logger.error(f"❌ Tried {len(urls_to_try)} Cloudinary URL(s) and IPFS fallback")
+                    logger.error(f"❌ CRITICAL: Video frame extraction failed - Discord won't be able to display image!")
+                    logger.error(f"❌ Video NFT detected but frame extraction failed")
                 else:
                     logger.debug(f"Could not download image from embed URL (may be too large)")
         
