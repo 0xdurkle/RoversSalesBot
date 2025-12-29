@@ -23,12 +23,13 @@ if not client_id:
     client_id = input("\nEnter your Client ID: ").strip()
 
 if client_id:
-    # Required permissions:
+    # Required permissions for image display:
     # - Send Messages (2048)
-    # - Embed Links (16384)
+    # - Embed Links (16384) - Required for embed images
+    # - Attach Files (32768) - Required for file attachments (optional but recommended)
     # - Read Message History (65536)
     # - Use Slash Commands (2147483648)
-    permissions = 2048 + 16384 + 65536 + 2147483648
+    permissions = 2048 + 16384 + 32768 + 65536 + 2147483648
     
     invite_url = f"https://discord.com/api/oauth2/authorize?client_id={client_id}&permissions={permissions}&scope=bot%20applications.commands"
     

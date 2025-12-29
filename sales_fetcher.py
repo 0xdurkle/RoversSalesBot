@@ -7,7 +7,7 @@ import logging
 import ssl
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Dict
 from decimal import Decimal
 
 import aiohttp
@@ -50,6 +50,7 @@ class SalesFetcher:
         self.rpc_url = f"https://eth-mainnet.g.alchemy.com/v2/{api_key}"
         self.nft_api_url = f"https://eth-mainnet.g.alchemy.com/nft/v3/{api_key}"
         self.session: Optional[aiohttp.ClientSession] = None
+        self._metadata_cache: Dict[str, dict] = {}  # Cache metadata to avoid duplicate API calls
     
     async def _get_session(self) -> aiohttp.ClientSession:
         """Get or create HTTP session."""
@@ -184,6 +185,7 @@ class SalesFetcher:
     async def get_nft_metadata(self, token_id: str) -> dict:
         """
         Get NFT metadata including image.
+        Uses caching to avoid duplicate API calls.
         
         Args:
             token_id: Token ID (hex or decimal string)
@@ -195,11 +197,40 @@ class SalesFetcher:
         if token_id.startswith("0x"):
             token_id = str(int(token_id, 16))
         
+        # Check cache first
+        cache_key = f"{self.contract_address}:{token_id}"
+        if cache_key in self._metadata_cache:
+            logger.debug(f"Using cached metadata for token {token_id}")
+            return self._metadata_cache[cache_key]
+        
         params = {
             "contractAddress": self.contract_address,
             "tokenId": token_id
         }
-        return await self._nft_api_call("getNFTMetadata", params)
+        metadata = await self._nft_api_call("getNFTMetadata", params)
+        
+        # Cache the result
+        if metadata:
+            self._metadata_cache[cache_key] = metadata
+        
+        return metadata
+    
+    def construct_alchemy_cdn_url(self, token_id: str) -> Optional[str]:
+        """
+        Construct Alchemy CDN URL directly from token ID.
+        This is a fallback when cachedUrl is not available.
+        
+        Format: https://nft-cdn.alchemy.com/eth-mainnet/{contract_hash}
+        
+        Args:
+            token_id: Token ID
+            
+        Returns:
+            Alchemy CDN URL or None if can't construct
+        """
+        # This is a fallback - we can't construct the hash without the metadata
+        # But we can try to get it from the metadata if available
+        return None
     
     async def get_current_block(self) -> int:
         """
@@ -322,9 +353,51 @@ class SalesFetcher:
                     continue
                 
                 # Try different image sources in priority order
+                # We'll collect all URLs and pick the best one (prefer Alchemy CDN over Cloudinary)
                 image_url = None
+                cloudinary_url = None  # Store Cloudinary URL as fallback only
                 
-                # 1. Try media[0].gateway (can be string or dict)
+                # FIRST: Check top-level image (where cachedUrl usually exists)
+                # We check this FIRST because it's the most reliable source
+                top_image = result.get("image")
+                if isinstance(top_image, dict):
+                    cached_url = top_image.get("cachedUrl")
+                    original_url = top_image.get("originalUrl")
+                    png_url = top_image.get("pngUrl")
+                    thumbnail_url = top_image.get("thumbnailUrl")
+                    
+                    logger.info(f"🔍 Checking top-level image FIRST (most reliable source):")
+                    logger.info(f"🔍   cachedUrl: {repr(cached_url)} (type: {type(cached_url).__name__})")
+                    logger.info(f"🔍   originalUrl: {original_url[:100] if original_url else 'None'}...")
+                    
+                    if cached_url and isinstance(cached_url, str) and cached_url.strip():
+                        image_url = cached_url.strip()
+                        logger.info(f"✅ FOUND cachedUrl in top-level image (Alchemy CDN): {image_url}")
+                    elif original_url and isinstance(original_url, str) and original_url.strip():
+                        if "nft-cdn.alchemy.com" in original_url:
+                            image_url = original_url.strip()
+                            logger.info(f"✅ FOUND originalUrl in top-level image (Alchemy CDN): {image_url[:80]}...")
+                        else:
+                            # Store as potential fallback
+                            if not image_url:
+                                image_url = original_url.strip()
+                                logger.info(f"Found originalUrl in top-level (not Alchemy CDN): {image_url[:80]}...")
+                    elif png_url and isinstance(png_url, str) and png_url.strip():
+                        # Store Cloudinary as fallback
+                        cloudinary_url = png_url.strip()
+                        logger.info(f"Found Cloudinary PNG in top-level (will use as fallback): {cloudinary_url[:60]}...")
+                    elif thumbnail_url and isinstance(thumbnail_url, str) and thumbnail_url.strip():
+                        # Store Cloudinary as fallback
+                        if not cloudinary_url:
+                            cloudinary_url = thumbnail_url.strip()
+                            logger.info(f"Found Cloudinary thumbnail in top-level (will use as fallback): {cloudinary_url[:60]}...")
+                
+                # If we found Alchemy CDN URL in top-level, use it and skip other sources
+                if image_url and "nft-cdn.alchemy.com" in image_url:
+                    logger.info(f"✅ Using Alchemy CDN URL from top-level image, skipping other sources")
+                else:
+                    # Continue checking other sources if we didn't find Alchemy CDN URL
+                    # 1. Try media[0].gateway (can be string or dict)
                 media = result.get("media", [])
                 logger.info(f"Media array length: {len(media) if media else 0}")
                 if media and len(media) > 0:
@@ -376,21 +449,45 @@ class SalesFetcher:
                         logger.debug(f"Has thumbnailUrl: {bool(gateway_dict.get('thumbnailUrl'))}")
                         logger.debug(f"ContentType: {gateway_dict.get('contentType', 'unknown')}")
                         
-                        # ALWAYS prefer PNG/thumbnail URLs if available (works for both videos and images)
-                        # Discord embeds work better with static images
-                        if gateway_dict.get("pngUrl"):
-                            image_url = gateway_dict.get("pngUrl")
-                            logger.info(f"Using PNG URL for embed: {image_url[:60]}...")
-                        elif gateway_dict.get("thumbnailUrl"):
-                            image_url = gateway_dict.get("thumbnailUrl")
-                            logger.info(f"Using thumbnail URL for embed: {image_url[:60]}...")
+                        # For embed images, prefer cachedUrl (Alchemy CDN) over Cloudinary URLs
+                        # Cloudinary URLs often return 400 errors, while Alchemy CDN works reliably
+                        # Note: cachedUrl may be large (>8MB) but works fine for Discord embeds
+                        gateway_cached = gateway_dict.get("cachedUrl")
+                        gateway_png = gateway_dict.get("pngUrl")
+                        gateway_thumb = gateway_dict.get("thumbnailUrl")
+                        gateway_original = gateway_dict.get("originalUrl")
+                        
+                        logger.info(f"🔍 Gateway dict URLs - cachedUrl: {bool(gateway_cached)}, pngUrl: {bool(gateway_png)}, thumbnailUrl: {bool(gateway_thumb)}, originalUrl: {bool(gateway_original)}")
+                        
+                        if gateway_cached and isinstance(gateway_cached, str) and gateway_cached.strip():
+                            image_url = gateway_cached.strip()
+                            logger.info(f"✅ SELECTED: cached URL from gateway (Alchemy CDN): {image_url}")
+                        elif gateway_original and isinstance(gateway_original, str) and gateway_original.strip():
+                            # Check if originalUrl is Alchemy CDN
+                            if "nft-cdn.alchemy.com" in gateway_original:
+                                image_url = gateway_original.strip()
+                                logger.info(f"✅ SELECTED: original URL from gateway (Alchemy CDN): {image_url[:60]}...")
+                            else:
+                                image_url = gateway_original.strip()
+                                logger.info(f"SELECTED: original URL from gateway: {image_url[:60]}...")
+                        elif gateway_png and isinstance(gateway_png, str) and gateway_png.strip():
+                            # Store Cloudinary URL as fallback, but continue checking for better URLs
+                            cloudinary_url = gateway_png.strip()
+                            logger.info(f"Found Cloudinary PNG URL in gateway (will use as fallback if no better URL found): {cloudinary_url[:60]}...")
+                            # Don't set image_url yet - continue checking other sources
+                        elif gateway_thumb and isinstance(gateway_thumb, str) and gateway_thumb.strip():
+                            # Store Cloudinary URL as fallback, but continue checking for better URLs
+                            if not cloudinary_url:  # Only use thumbnail if we don't have PNG
+                                cloudinary_url = gateway_thumb.strip()
+                                logger.info(f"Found Cloudinary thumbnail URL in gateway (will use as fallback if no better URL found): {cloudinary_url[:60]}...")
+                            # Don't set image_url yet - continue checking other sources
                         elif is_video:
-                            # For videos without PNG/thumbnail, log warning
-                            logger.warning(f"Video detected but no PNG/thumbnail available. Available keys: {list(gateway_dict.keys())}")
-                            image_url = gateway_dict.get("cachedUrl") or gateway_dict.get("originalUrl")
+                            # For videos without cached URL, log warning
+                            logger.warning(f"Video detected but no cached URL available. Available keys: {list(gateway_dict.keys())}")
+                            image_url = gateway_original if gateway_original else None
                         else:
-                            # For images, prefer cachedUrl, then originalUrl
-                            image_url = gateway_dict.get("cachedUrl") or gateway_dict.get("originalUrl")
+                            # Last resort: originalUrl
+                            image_url = gateway_original if gateway_original else None
                     else:
                         # Gateway is a string URL directly
                         image_url = media_item.get("gateway")
@@ -414,18 +511,21 @@ class SalesFetcher:
                             if not is_video:
                                 is_video = "video" in raw_item.get("contentType", "").lower()
                             
-                            # ALWAYS prefer PNG/thumbnail URLs if available
-                            if raw_item.get("pngUrl"):
+                            # Prefer cachedUrl (Alchemy CDN) over Cloudinary URLs for embeds
+                            if raw_item.get("cachedUrl"):
+                                image_url = raw_item.get("cachedUrl")
+                                logger.info(f"Using cached URL from raw (Alchemy CDN): {image_url[:60]}...")
+                            elif raw_item.get("pngUrl"):
                                 image_url = raw_item.get("pngUrl")
-                                logger.info(f"Using PNG URL from raw: {image_url[:60]}...")
+                                logger.info(f"Using PNG URL from raw (Cloudinary): {image_url[:60]}...")
                             elif raw_item.get("thumbnailUrl"):
                                 image_url = raw_item.get("thumbnailUrl")
-                                logger.info(f"Using thumbnail URL from raw: {image_url[:60]}...")
+                                logger.info(f"Using thumbnail URL from raw (Cloudinary): {image_url[:60]}...")
                             elif is_video:
-                                logger.warning("Video in raw but no PNG/thumbnail available")
-                                image_url = raw_item.get("cachedUrl") or raw_item.get("originalUrl")
+                                logger.warning("Video in raw but no cached URL available")
+                                image_url = raw_item.get("originalUrl")
                             else:
-                                image_url = raw_item.get("cachedUrl") or raw_item.get("originalUrl")
+                                image_url = raw_item.get("originalUrl")
                         else:
                             image_url = raw_item
                 
@@ -439,38 +539,26 @@ class SalesFetcher:
                         # Handle dict case
                         if isinstance(meta_image, dict):
                             logger.info(f"Metadata image dict keys: {list(meta_image.keys())}")
-                            if meta_image.get("pngUrl"):
+                            # Prefer cachedUrl for embeds
+                            if meta_image.get("cachedUrl"):
+                                image_url = meta_image.get("cachedUrl")
+                                logger.info(f"Using cached URL from metadata.image (Alchemy CDN): {image_url[:80]}...")
+                            elif meta_image.get("pngUrl"):
                                 image_url = meta_image.get("pngUrl")
-                                logger.info(f"Using PNG URL from metadata.image: {image_url[:80]}...")
+                                logger.info(f"Using PNG URL from metadata.image (Cloudinary): {image_url[:80]}...")
                             elif meta_image.get("thumbnailUrl"):
                                 image_url = meta_image.get("thumbnailUrl")
-                                logger.info(f"Using thumbnail URL from metadata.image: {image_url[:80]}...")
+                                logger.info(f"Using thumbnail URL from metadata.image (Cloudinary): {image_url[:80]}...")
                             else:
-                                image_url = meta_image.get("cachedUrl") or meta_image.get("originalUrl")
+                                image_url = meta_image.get("originalUrl")
                         else:
                             image_url = meta_image
                 
-                # 3. Try top-level image
-                if not image_url:
-                    top_image = result.get("image")
-                    logger.info(f"Top-level image type: {type(top_image)}, value: {str(top_image)[:200] if top_image else 'None'}")
-                    if isinstance(top_image, dict):
-                        logger.info(f"Top-level image dict keys: {list(top_image.keys())}")
-                        # Try PNG URL first (more reliable than thumbnail)
-                        if top_image.get("pngUrl"):
-                            image_url = top_image.get("pngUrl")
-                            logger.info(f"Using PNG URL from top-level image: {image_url}")
-                        elif top_image.get("thumbnailUrl"):
-                            image_url = top_image.get("thumbnailUrl")
-                            logger.info(f"Using thumbnail URL from top-level image: {image_url}")
-                        elif top_image.get("cachedUrl"):
-                            image_url = top_image.get("cachedUrl")
-                            logger.info(f"Using cached URL from top-level image: {image_url[:80]}...")
-                        else:
-                            image_url = top_image.get("originalUrl")
-                            logger.info(f"Using original URL from top-level image: {image_url[:80] if image_url else 'None'}...")
-                    else:
-                        image_url = top_image
+                # Final fallback: Use Cloudinary URL only if we have nothing else
+                if not image_url and cloudinary_url:
+                    image_url = cloudinary_url
+                    logger.warning(f"⚠️  FINAL FALLBACK: Using Cloudinary URL (may return 400): {image_url[:60]}...")
+                    logger.warning(f"⚠️  WARNING: No Alchemy CDN URL found, using Cloudinary which may fail!")
                 
                 # Log where the image URL came from
                 if image_url:
@@ -1010,8 +1098,12 @@ class SalesFetcher:
                     logger.info(f"Downloaded image: {len(image_data)} bytes, Content-Type: {content_type} from {image_url[:60]}...")
                     return image_data
                 elif response.status == 400:
-                    # For Cloudinary 400 errors, log the full URL for debugging
-                    logger.warning(f"HTTP 400 from Cloudinary - URL might be malformed: {image_url[:120]}...")
+                    # For Cloudinary 400 errors, skip this URL - it's likely malformed
+                    # Cloudinary URLs often fail with 400, so we'll try other URLs
+                    if 'cloudinary.com' in image_url:
+                        logger.debug(f"Skipping Cloudinary URL (HTTP 400): {image_url[:100]}...")
+                    else:
+                        logger.warning(f"HTTP 400 from {image_url[:60]}... - URL might be malformed")
                     return None
                 else:
                     logger.warning(f"Failed to download image: HTTP {response.status} from {image_url[:60]}...")
@@ -1050,6 +1142,8 @@ class SalesFetcher:
             return None
         
         # Try all primary URLs first (with overall timeout)
+        # Skip Cloudinary URLs for file downloads (they often return 400)
+        # Prefer smaller thumbnail URLs for file attachments
         start_time = asyncio.get_event_loop().time()
         for i, url in enumerate(urls):
             # Check if we've exceeded max time
@@ -1057,6 +1151,12 @@ class SalesFetcher:
             if elapsed > max_time:
                 logger.warning(f"Image download timeout for token {token_id} after {elapsed:.1f}s")
                 break
+            
+            # Skip Cloudinary URLs for file downloads - they often return 400
+            # Use them for embed images only (which we already do in fetch_nft_images)
+            if 'cloudinary.com' in url:
+                logger.debug(f"Skipping Cloudinary URL for file download (often returns 400): {url[:80]}...")
+                continue
             
             logger.info(f"Trying image URL {i+1}/{len(urls)} for token {token_id}: {url[:80]}...")
             image_data = await self.download_image(url)

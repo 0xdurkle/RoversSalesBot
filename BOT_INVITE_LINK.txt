@@ -1,0 +1,20 @@
+Your Discord Bot Invite Link:
+
+https://discord.com/api/oauth2/authorize?client_id=1451425237999685714&permissions=49664&scope=bot%20applications.commands
+
+Permissions included:
+- Send Messages (2048)
+- Embed Links (16384) - Required for embed images
+- Attach Files (32768) - For file attachments
+- Read Message History (65536)
+- Use Slash Commands (2147483648)
+
+Total: 49664
+
+Instructions:
+1. Copy the URL above
+2. Open it in your browser
+3. Select the server where you want to add the bot
+4. Click "Authorize"
+5. The bot will be added with all the correct permissions!
+

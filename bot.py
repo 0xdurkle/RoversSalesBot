@@ -151,18 +151,69 @@ def create_sale_embed(sale: SaleEvent, image_urls: List[str]) -> discord.Embed:
         timestamp=sale.timestamp if sale.timestamp else discord.utils.utcnow()
     )
     
+    # Add IPFS video link for Rover NFTs
+    # Format: https://ipfs.io/ipfs/QmXNofSXgZNVTnu1jdaFHM42M4BM4Nnv8Srv7Zat4ueAPa/{TOKEN_ID}.mp4
+    if sale.token_id:
+        ipfs_video_url = f"https://ipfs.io/ipfs/QmXNofSXgZNVTnu1jdaFHM42M4BM4Nnv8Srv7Zat4ueAPa/{sale.token_id}.mp4"
+        embed.add_field(
+            name="🎥 Video",
+            value=f"[Watch Rover Video]({ipfs_video_url})",
+            inline=True
+        )
+        logger.info(f"Added IPFS video link for token {sale.token_id}: {ipfs_video_url}")
+    elif sale.token_ids and len(sale.token_ids) > 0:
+        # For sweeps, add video link for first token
+        ipfs_video_url = f"https://ipfs.io/ipfs/QmXNofSXgZNVTnu1jdaFHM42M4BM4Nnv8Srv7Zat4ueAPa/{sale.token_ids[0]}.mp4"
+        embed.add_field(
+            name="🎥 Video (First Token)",
+            value=f"[Watch Rover Video]({ipfs_video_url})",
+            inline=True
+        )
+        logger.info(f"Added IPFS video link for token {sale.token_ids[0]}: {ipfs_video_url}")
+    
     # Add first image if available
     if image_urls:
         try:
             image_url = image_urls[0]
             # Ensure URL is complete and valid
             if not image_url.startswith(("http://", "https://")):
-                logger.warning(f"Invalid image URL format: {image_url[:50]}")
+                logger.warning(f"Invalid image URL format: {image_url[:50]}...")
             else:
+                # Validate URL length (Discord has limits)
+                if len(image_url) > 2000:
+                    logger.warning(f"Image URL too long ({len(image_url)} chars), truncating to 2000")
+                    image_url = image_url[:2000]
+                
+                # Clean URL - remove any trailing issues
+                image_url = image_url.strip()
+                
+                # Quick validation: Check if URL looks valid
+                if not image_url.startswith(("http://", "https://")):
+                    logger.error(f"✗ Invalid image URL format (doesn't start with http/https): {image_url[:100]}...")
+                elif "cloudinary.com" in image_url:
+                    logger.warning(f"⚠ Using Cloudinary URL (may return 400): {image_url[:100]}...")
+                    logger.warning("⚠ Discord may not be able to fetch this URL - Cloudinary URLs often fail")
+                elif "nft-cdn.alchemy.com" in image_url:
+                    logger.info(f"✓ Using Alchemy CDN URL (should work): {image_url[:100]}...")
+                
+                # Log the FULL URL before setting (for debugging)
+                logger.info(f"🔍 FULL IMAGE URL (before setting): {image_url}")
+                
+                # Set embed image
                 embed.set_image(url=image_url)
-                logger.info(f"Set embed image (full URL): {image_url}")
-                # Also log the URL length to ensure it's not truncated
-                logger.info(f"Image URL length: {len(image_url)} characters")
+                logger.info(f"✓ Set embed image URL: {image_url[:100]}... (length: {len(image_url)} chars)")
+                
+                # Verify it was set correctly
+                if embed.image and embed.image.url:
+                    logger.info(f"✓ Embed image verified: {embed.image.url[:100]}...")
+                    # Log the full URL for debugging - USER CAN TEST THIS IN BROWSER
+                    logger.info(f"🔍 FULL EMBED IMAGE URL (copy this and test in browser):")
+                    logger.info(f"🔍 {embed.image.url}")
+                    logger.info(f"✓ Discord should fetch this URL when displaying the embed")
+                    logger.info(f"💡 TIP: Copy the URL above and open it in your browser to verify it works")
+                else:
+                    logger.error("✗ Failed to set embed image - embed.image is None or has no URL")
+                    logger.error(f"✗ Attempted URL was: {image_url[:200]}")
         except Exception as e:
             logger.error(f"Error setting embed image: {e}", exc_info=True)
     else:
@@ -311,41 +362,52 @@ async def process_webhook_events_grouped(tx_hash: str, events: List[dict]):
             is_weth=is_weth
         )
         
-        # Fetch images (limit to 20)
+        # Fetch images (limit to 20) - this gets the embed image URL
         image_urls = await sales_fetcher.fetch_nft_images(token_ids, max_images=20)
         logger.info(f"Fetched {len(image_urls)} image(s) for webhook sale")
         
-        # Create embed
+        # Create embed with the image URL
         embed = create_sale_embed(sale, image_urls)
         
-        # Try to download and attach image as file (more reliable than embed images)
+        # Try to download image for file attachment (optional - embed image should work)
+        # Only try if we have a URL and it's not Cloudinary (which returns 400)
         file = None
-        if token_ids and len(token_ids) > 0:
+        image_data = None
+        if token_ids and len(token_ids) > 0 and image_urls:
             try:
-                # Use the new function that tries all URLs in priority order (5 second timeout)
-                image_data = await sales_fetcher.download_image_with_fallbacks(token_ids[0], max_time=5.0)
-                if image_data:
-                    # Determine file extension from first successful URL
-                    urls = await sales_fetcher.get_all_image_urls_for_token(token_ids[0])
-                    ext = "png"  # Default
-                    if urls:
-                        url_lower = urls[0].lower()
+                # Use the URL we already fetched - don't make more API calls!
+                embed_url = image_urls[0]
+                logger.info(f"Attempting to download image from embed URL: {embed_url[:80]}...")
+                
+                # Skip Cloudinary URLs - they return 400
+                if 'cloudinary.com' not in embed_url:
+                    image_data = await sales_fetcher.download_image(embed_url)
+                    if image_data:
+                        # Determine file extension from URL
+                        ext = "png"  # Default
+                        url_lower = embed_url.lower()
                         if ".jpg" in url_lower or ".jpeg" in url_lower:
                             ext = "jpg"
                         elif ".gif" in url_lower:
                             ext = "gif"
                         elif ".webp" in url_lower:
                             ext = "webp"
-                    
-                    file = discord.File(
-                        io.BytesIO(image_data),
-                        filename=f"nft_{sale.token_id or 'image'}.{ext}"
-                    )
-                    logger.info(f"Downloaded image for webhook sale: {len(image_data)} bytes")
+                        
+                        file = discord.File(
+                            io.BytesIO(image_data),
+                            filename=f"nft_{sale.token_id or 'image'}.{ext}"
+                        )
+                        logger.info(f"✓ Successfully downloaded image for webhook sale: {len(image_data)} bytes, extension: {ext}")
+                    else:
+                        logger.debug(f"Could not download image from embed URL (may be too large), but embed image should still work")
+                else:
+                    logger.debug(f"Skipping Cloudinary URL download (returns 400), using embed image only")
             except Exception as e:
-                logger.warning(f"Failed to download image for webhook sale: {e}")
+                logger.debug(f"Exception downloading image (non-critical): {e}")
+                # Don't log as warning - embed image should still work
         
         # Get channel if not already set (in case it wasn't found at startup)
+        global discord_channel
         if not discord_channel:
             discord_channel = client.get_channel(DISCORD_CHANNEL_ID)
             if not discord_channel:
@@ -359,13 +421,30 @@ async def process_webhook_events_grouped(tx_hash: str, events: List[dict]):
         
         if discord_channel:
             try:
-                if file:
-                    await discord_channel.send(embed=embed, file=file)
-                    logger.info("Posted sale with image attachment")
+                # Log image information for debugging
+                if image_urls:
+                    logger.info(f"Using embed image URL: {image_urls[0][:100]}... (length: {len(image_urls[0])})")
                 else:
-                    await discord_channel.send(embed=embed)
-                    if not image_urls:
-                        logger.warning(f"No images found for webhook sale token ID(s): {token_ids}")
+                    logger.warning(f"No image URLs available for token ID(s): {token_ids}")
+                
+                if file:
+                    logger.info(f"Sending message with embed + file attachment ({len(image_data)} bytes)")
+                    message = await discord_channel.send(embed=embed, file=file)
+                    logger.info(f"Posted sale with image attachment - Message ID: {message.id}")
+                else:
+                    if image_urls:
+                        logger.info(f"Sending message with embed image URL only (file download failed or not attempted)")
+                    else:
+                        logger.warning(f"Sending message without image - no image URLs found for token ID(s): {token_ids}")
+                    message = await discord_channel.send(embed=embed)
+                    logger.info(f"Posted sale - Message ID: {message.id}")
+                
+                # Log embed image status
+                if embed.image:
+                    logger.info(f"Embed image URL set: {embed.image.url[:100] if embed.image.url else 'None'}...")
+                else:
+                    logger.warning("Embed image URL was NOT set - check image URL fetching")
+                
                 logger.info(
                     f"Posted sale: {sale.token_count} NFT(s) for {format_price(price, is_weth)} "
                     f"in tx {tx_hash}"
@@ -374,8 +453,14 @@ async def process_webhook_events_grouped(tx_hash: str, events: List[dict]):
                 logger.error(f"Bot doesn't have permission to send messages in channel {DISCORD_CHANNEL_ID}")
             except discord.NotFound:
                 logger.error(f"Channel {DISCORD_CHANNEL_ID} not found - bot may not be in the server")
+            except discord.HTTPException as e:
+                logger.error(f"Discord API error posting message: {e.status} - {e.text}")
+                if e.status == 400:
+                    logger.error("Bad request - check embed/image URL format")
+                elif e.status == 413:
+                    logger.error("File too large - image exceeds Discord size limit")
             except Exception as e:
-                logger.error(f"Error posting to Discord: {e}")
+                logger.error(f"Error posting to Discord: {e}", exc_info=True)
         else:
             logger.error(f"Discord channel {DISCORD_CHANNEL_ID} not available - check bot is in server and has access")
         
@@ -426,6 +511,10 @@ async def handle_alchemy_webhook(request: web.Request) -> web.Response:
     Returns:
         HTTP response
     """
+    # Log that we received a request (even if it's not a valid webhook)
+    logger.info(f"Webhook endpoint hit: {request.method} {request.path} from {request.remote}")
+    logger.info(f"Request headers: {dict(request.headers)}")
+    
     # Optional webhook authentication
     if WEBHOOK_SECRET:
         signature = request.headers.get("X-Alchemy-Signature", "")
@@ -437,7 +526,7 @@ async def handle_alchemy_webhook(request: web.Request) -> web.Response:
         # Parse JSON payload
         data = await request.json()
         webhook_id = data.get('webhookId', 'unknown')
-        logger.info(f"Received webhook: {webhook_id}")
+        logger.info(f"✅ Received webhook from Alchemy: {webhook_id}")
         
         # Alchemy can send events in two formats:
         # 1. Array format: {"activity": [event1, event2, ...]}
@@ -568,53 +657,75 @@ async def lastsale(interaction: discord.Interaction):
         # Get token IDs
         token_ids = sale.token_ids if sale.token_ids else ([sale.token_id] if sale.token_id else [])
         
-        # Fetch images
+        # Fetch images - this gets the embed image URL (only 1 API call per token)
         image_urls = await sales_fetcher.fetch_nft_images(token_ids, max_images=20)
         logger.info(f"Fetched {len(image_urls)} image(s) for /lastsale command")
         
-        # Create embed
+        # Create embed with the image URL
         embed = create_sale_embed(sale, image_urls)
         embed.set_footer(text=f"Requested by {interaction.user.display_name} | NFT Sales Monitor")
         
-        # Try to download and attach image as file (more reliable than embed images)
+        # Try to download image for file attachment (optional - embed image should work)
+        # Only try if we have a URL and it's not Cloudinary (which returns 400)
         file = None
-        if token_ids and len(token_ids) > 0:
+        image_data = None
+        if token_ids and len(token_ids) > 0 and image_urls:
             try:
-                # Use the new function that tries all URLs in priority order (5 second timeout)
-                image_data = await sales_fetcher.download_image_with_fallbacks(token_ids[0], max_time=5.0)
-                if image_data:
-                    # Determine file extension from first successful URL
-                    # Get URLs to check extension
-                    urls = await sales_fetcher.get_all_image_urls_for_token(token_ids[0])
-                    ext = "png"  # Default
-                    if urls:
-                        url_lower = urls[0].lower()
+                # Use the URL we already fetched - don't make more API calls!
+                embed_url = image_urls[0]
+                logger.info(f"Attempting to download image from embed URL: {embed_url[:80]}...")
+                
+                # Skip Cloudinary URLs - they return 400
+                if 'cloudinary.com' not in embed_url:
+                    image_data = await sales_fetcher.download_image(embed_url)
+                    if image_data:
+                        # Determine file extension from URL
+                        ext = "png"  # Default
+                        url_lower = embed_url.lower()
                         if ".jpg" in url_lower or ".jpeg" in url_lower:
                             ext = "jpg"
                         elif ".gif" in url_lower:
                             ext = "gif"
                         elif ".webp" in url_lower:
                             ext = "webp"
-                    
-                    file = discord.File(
-                        io.BytesIO(image_data),
-                        filename=f"nft_{sale.token_id or 'image'}.{ext}"
-                    )
-                    logger.info(f"Successfully downloaded and attached image: {len(image_data)} bytes")
+                        
+                        file = discord.File(
+                            io.BytesIO(image_data),
+                            filename=f"nft_{sale.token_id or 'image'}.{ext}"
+                        )
+                        logger.info(f"✓ Successfully downloaded and attached image: {len(image_data)} bytes, extension: {ext}")
+                    else:
+                        logger.debug(f"Could not download image from embed URL (may be too large), but embed image should still work")
+                else:
+                    logger.debug(f"Skipping Cloudinary URL download (returns 400), using embed image only")
             except Exception as e:
-                logger.warning(f"Failed to download image: {e}")
+                logger.debug(f"Exception downloading image (non-critical): {e}")
+                # Don't log as warning - embed image should still work
+        
+        # Log image information for debugging
+        if image_urls:
+            logger.info(f"Using embed image URL: {image_urls[0][:100]}... (length: {len(image_urls[0])})")
+        else:
+            logger.warning(f"No image URLs available for token ID(s): {token_ids}")
         
         # Send message with embed and file attachment
         if file:
-            await interaction.followup.send(embed=embed, file=file)
-            logger.info("Sent message with image attachment")
+            logger.info(f"Sending message with embed + file attachment ({len(image_data)} bytes)")
+            message = await interaction.followup.send(embed=embed, file=file)
+            logger.info(f"✓ Sent message with image attachment - Message ID: {message.id if hasattr(message, 'id') else 'N/A'}")
         else:
-            # Fallback to embed image if download fails
-            await interaction.followup.send(embed=embed)
             if image_urls:
-                logger.warning("Could not download image, using embed image URL instead")
+                logger.info(f"Sending message with embed image URL only (file download failed or not attempted)")
             else:
-                logger.warning(f"No images found for token ID(s): {token_ids}")
+                logger.warning(f"Sending message without image - no image URLs found for token ID(s): {token_ids}")
+            message = await interaction.followup.send(embed=embed)
+            logger.info(f"✓ Sent message - Message ID: {message.id if hasattr(message, 'id') else 'N/A'}")
+        
+        # Log embed image status
+        if embed.image:
+            logger.info(f"✓ Embed image URL set: {embed.image.url[:100] if embed.image.url else 'None'}...")
+        else:
+            logger.warning("✗ Embed image URL was NOT set - check image URL fetching")
         logger.info(f"Last sale command executed by {interaction.user}")
         
     except Exception as e:
@@ -626,20 +737,33 @@ async def health_check(request: web.Request) -> web.Response:
     """Health check endpoint for Railway/webhook monitoring."""
     return web.Response(text="OK", status=200)
 
+async def webhook_test(request: web.Request) -> web.Response:
+    """Test endpoint to verify webhook is accessible."""
+    logger.info(f"Webhook test endpoint hit from {request.remote}")
+    return web.Response(
+        text="Webhook endpoint is accessible! Configure this URL in Alchemy: https://your-domain.com/webhook",
+        status=200
+    )
+
 async def start_webhook_server():
     """Start aiohttp webhook server."""
     app = web.Application()
     app.router.add_post("/webhook", handle_alchemy_webhook)
     app.router.add_get("/", health_check)  # Health check endpoint
     app.router.add_get("/health", health_check)  # Alternative health check
+    app.router.add_get("/webhook-test", webhook_test)  # Webhook test endpoint
     
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", WEBHOOK_PORT)
     await site.start()
-    logger.info(f"Webhook server started on port {WEBHOOK_PORT}")
-    logger.info("IPFS image fetching enabled - prioritizing direct IPFS URLs")
-    logger.info(f"Health check available at: http://0.0.0.0:{WEBHOOK_PORT}/health")
+    logger.info(f"✅ Webhook server started on port {WEBHOOK_PORT}")
+    logger.info(f"✅ Webhook endpoint: http://0.0.0.0:{WEBHOOK_PORT}/webhook")
+    logger.info(f"✅ Health check: http://0.0.0.0:{WEBHOOK_PORT}/health")
+    logger.info(f"✅ Webhook test: http://0.0.0.0:{WEBHOOK_PORT}/webhook-test")
+    logger.info("⚠️  IMPORTANT: Configure this webhook URL in Alchemy Dashboard!")
+    logger.info("⚠️  For local testing, use ngrok: ngrok http 8080")
+    logger.info("⚠️  For production, use your Railway/public URL: https://your-app.railway.app/webhook")
 
 
 async def main():
