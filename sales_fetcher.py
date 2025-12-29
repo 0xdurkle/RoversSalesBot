@@ -308,18 +308,18 @@ class SalesFetcher:
                 return (0, False)
             
             block_num = int(block_hex, 16)
-            block_hex_str = hex(block_num)
             
-            # Also check previous block in case WETH transfer was in different block
-            prev_block_hex_str = hex(block_num - 1) if block_num > 0 else block_hex_str
+            # Check a range of blocks around the transaction block (WETH transfers can be in nearby blocks)
+            # Check from block-2 to block+1 to catch WETH transfers
+            from_block = max(0, block_num - 2)
+            to_block = block_num + 1
             
-            # Get ERC-20 transfers for this block and previous block (WETH only)
-            # Check current block first
+            # Get ERC-20 transfers for this block range (WETH only)
             transfers = await self.get_asset_transfers(
                 contract_address=WETH_CONTRACT,
                 category=["erc20"],
-                from_block=block_hex_str,
-                to_block=block_hex_str
+                from_block=hex(from_block),
+                to_block=hex(to_block)
             )
             
             weth_total = 0
@@ -337,27 +337,8 @@ class SalesFetcher:
                         except (ValueError, TypeError):
                             pass
             
-            # If not found in current block, check previous block
-            if weth_total == 0 and block_num > 0:
-                transfers_prev = await self.get_asset_transfers(
-                    contract_address=WETH_CONTRACT,
-                    category=["erc20"],
-                    from_block=prev_block_hex_str,
-                    to_block=prev_block_hex_str
-                )
-                transfers_list_prev = transfers_prev.get("transfers", [])
-                for transfer in transfers_list_prev:
-                    transfer_hash = transfer.get("hash", "")
-                    if transfer_hash and transfer_hash.lower() == tx_hash.lower():
-                        value_hex = transfer.get("value", "0x0")
-                        if value_hex and value_hex != "0x0":
-                            try:
-                                weth_total += int(value_hex, 16)
-                            except (ValueError, TypeError):
-                                pass
-            
             if weth_total > 0:
-                logger.debug(f"Found WETH transfer: {weth_total} wei for tx {tx_hash[:16]}...")
+                logger.info(f"✅ Found WETH transfer: {weth_total / (10**18):.6f} WETH for tx {tx_hash[:16]}...")
                 return (weth_total, True)
             
             return (0, False)
@@ -1482,6 +1463,15 @@ class SalesFetcher:
                         except (ValueError, TypeError):
                             pass
                     
+                    # Get transaction index for better sorting (within same block)
+                    tx_index_hex = transfer.get("transactionIndex", "0x0")
+                    tx_index = 0
+                    if tx_index_hex and tx_index_hex != "0x0":
+                        try:
+                            tx_index = int(tx_index_hex, 16)
+                        except (ValueError, TypeError):
+                            pass
+                    
                     token_id_raw = transfer.get("tokenId", "")
                     
                     # Convert token ID from hex to decimal string if needed
@@ -1501,7 +1491,8 @@ class SalesFetcher:
                         "from_addr": from_addr,
                         "to_addr": to_addr,
                         "token_id": token_id,
-                        "block_number": block_number
+                        "block_number": block_number,
+                        "transaction_index": tx_index
                     })
                 
                 # Check prices for all candidates in parallel (batch)
@@ -1539,12 +1530,14 @@ class SalesFetcher:
                         
                         # Store block number with sale for sorting
                         sale._block_number = candidate["block_number"]
+                        # Also store transaction index for better sorting (WETH sales might be in same block)
+                        sale._tx_index = candidate.get("transaction_index", 0)
                         sales.append(sale)
                 
                 # After processing this chunk, sort and check
-                # Always sort by block number to ensure we have the most recent
+                # Sort by block number first, then by transaction index (most recent first)
                 if sales:
-                    sales.sort(key=lambda x: getattr(x, '_block_number', 0), reverse=True)
+                    sales.sort(key=lambda x: (getattr(x, '_block_number', 0), getattr(x, '_tx_index', 0)), reverse=True)
                     
                     # Remove duplicates
                     seen_hashes = set()
@@ -1567,7 +1560,8 @@ class SalesFetcher:
                         return sales[:n]
             
             # Final sort and deduplication (in case we collected from multiple chunks)
-            sales.sort(key=lambda x: getattr(x, '_block_number', 0), reverse=True)
+            # Sort by block number first, then by transaction index (most recent first)
+            sales.sort(key=lambda x: (getattr(x, '_block_number', 0), getattr(x, '_tx_index', 0)), reverse=True)
             
             # Remove duplicates by transaction hash
             seen_hashes = set()
