@@ -151,26 +151,6 @@ def create_sale_embed(sale: SaleEvent, image_urls: List[str]) -> discord.Embed:
         timestamp=sale.timestamp if sale.timestamp else discord.utils.utcnow()
     )
     
-    # Add IPFS video link for Rover NFTs
-    # Format: https://ipfs.io/ipfs/QmXNofSXgZNVTnu1jdaFHM42M4BM4Nnv8Srv7Zat4ueAPa/{TOKEN_ID}.mp4
-    if sale.token_id:
-        ipfs_video_url = f"https://ipfs.io/ipfs/QmXNofSXgZNVTnu1jdaFHM42M4BM4Nnv8Srv7Zat4ueAPa/{sale.token_id}.mp4"
-        embed.add_field(
-            name="🎥 Video",
-            value=f"[Watch Rover Video]({ipfs_video_url})",
-            inline=True
-        )
-        logger.info(f"Added IPFS video link for token {sale.token_id}: {ipfs_video_url}")
-    elif sale.token_ids and len(sale.token_ids) > 0:
-        # For sweeps, add video link for first token
-        ipfs_video_url = f"https://ipfs.io/ipfs/QmXNofSXgZNVTnu1jdaFHM42M4BM4Nnv8Srv7Zat4ueAPa/{sale.token_ids[0]}.mp4"
-        embed.add_field(
-            name="🎥 Video (First Token)",
-            value=f"[Watch Rover Video]({ipfs_video_url})",
-            inline=True
-        )
-        logger.info(f"Added IPFS video link for token {sale.token_ids[0]}: {ipfs_video_url}")
-    
     # Add first image if available
     if image_urls:
         try:
