@@ -56,9 +56,21 @@ except Exception:
 
 # Configure logging
 logging.basicConfig(
-    level=logging.DEBUG,  # Changed to DEBUG to see more details
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('bot.log'),
+        logging.StreamHandler()
+    ]
 )
+
+# Reduce noise from PIL and other libraries
+logging.getLogger('PIL').setLevel(logging.WARNING)
+logging.getLogger('imageio').setLevel(logging.WARNING)
+logging.getLogger('discord.gateway').setLevel(logging.WARNING)
+logging.getLogger('discord.client').setLevel(logging.WARNING)
+logging.getLogger('discord.webhook').setLevel(logging.WARNING)
+
 logger = logging.getLogger(__name__)
 
 # Configuration

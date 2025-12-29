@@ -297,9 +297,9 @@ class SalesFetcher:
             block_num = int(block_hex, 16)
             
             # Check a range of blocks around the transaction block (WETH transfers can be in nearby blocks)
-            # Check from block-2 to block+1 to catch WETH transfers
-            from_block = max(0, block_num - 2)
-            to_block = block_num + 1
+            # Check from block-5 to block+5 to catch WETH transfers (wider range for better detection)
+            from_block = max(0, block_num - 5)
+            to_block = block_num + 5
             
             # Get ERC-20 transfers for this block range (WETH only)
             transfers = await self.get_asset_transfers(
@@ -321,6 +321,7 @@ class SalesFetcher:
                 transfer_hash = transfer.get("hash", "")
                 transfer_from = transfer.get("from", "").lower()
                 transfer_to = transfer.get("to", "").lower()
+                transfer_block = transfer.get("blockNum", "")
                 
                 # Get WETH amount
                 value_hex = transfer.get("value", "0x0")
@@ -338,15 +339,34 @@ class SalesFetcher:
                                 weth_total += weth_amount
                                 logger.debug(f"Found WETH transfer (no seller check): {weth_amount / (10**18):.6f} WETH")
                         # Also check if WETH transfer involves the same addresses (might be different tx)
+                        # WETH goes from buyer to seller
                         elif seller_lower and buyer_lower:
-                            # WETH goes from buyer to seller
                             if transfer_from == buyer_lower and transfer_to == seller_lower:
-                                weth_total += weth_amount
-                                logger.info(f"✅ Found WETH in different tx: {weth_amount / (10**18):.6f} WETH from buyer {buyer_lower[:10]}... to seller {seller_lower[:10]}...")
+                                # Check if transfer is in a nearby block (within 5 blocks)
+                                if transfer_block:
+                                    try:
+                                        transfer_block_num = int(transfer_block, 16) if transfer_block.startswith("0x") else int(transfer_block)
+                                        if abs(transfer_block_num - block_num) <= 5:
+                                            weth_total += weth_amount
+                                            logger.info(f"✅ Found WETH in nearby block {transfer_block_num}: {weth_amount / (10**18):.6f} WETH from buyer {buyer_lower[:10]}... to seller {seller_lower[:10]}...")
+                                    except (ValueError, TypeError):
+                                        # If block parsing fails, still count it if addresses match
+                                        weth_total += weth_amount
+                                        logger.info(f"✅ Found WETH (addresses match): {weth_amount / (10**18):.6f} WETH from buyer {buyer_lower[:10]}... to seller {seller_lower[:10]}...")
+                                else:
+                                    # No block info, but addresses match - count it
+                                    weth_total += weth_amount
+                                    logger.info(f"✅ Found WETH (addresses match): {weth_amount / (10**18):.6f} WETH from buyer {buyer_lower[:10]}... to seller {seller_lower[:10]}...")
                         elif seller_lower and transfer_to == seller_lower:
-                            # WETH goes to seller (no buyer check)
-                            weth_total += weth_amount
-                            logger.info(f"✅ Found WETH to seller: {weth_amount / (10**18):.6f} WETH to {seller_lower[:10]}...")
+                            # WETH goes to seller (no buyer check) - but only if in nearby block
+                            if transfer_block:
+                                try:
+                                    transfer_block_num = int(transfer_block, 16) if transfer_block.startswith("0x") else int(transfer_block)
+                                    if abs(transfer_block_num - block_num) <= 5:
+                                        weth_total += weth_amount
+                                        logger.info(f"✅ Found WETH to seller in block {transfer_block_num}: {weth_amount / (10**18):.6f} WETH to {seller_lower[:10]}...")
+                                except (ValueError, TypeError):
+                                    pass
                     except (ValueError, TypeError):
                         pass
             
@@ -1425,7 +1445,9 @@ class SalesFetcher:
                             continue
                         
                         price, is_weth = price_result
-                        logger.debug(f"Transfer {candidate['tx_hash'][:10]}... - Price: {price} wei ({'WETH' if is_weth else 'ETH' if price > 0 else 'None'})")
+                        if price > 0:
+                            logger.debug(f"Transfer {candidate['tx_hash'][:10]}... - Price: {price} wei ({'WETH' if is_weth else 'ETH'})")
+                        # Only log 0 price if DEBUG level is enabled (too noisy otherwise)
                         
                         if price == 0:
                             logger.debug(f"Skipping transfer {candidate['tx_hash'][:10]}... - no price detected")
