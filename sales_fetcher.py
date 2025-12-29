@@ -320,38 +320,59 @@ class SalesFetcher:
             # Strategy 0: Check transaction receipt logs for WETH transfers in the SAME transaction
             # This is the most reliable - WETH transfers in the same tx will be in the logs
             logger.info(f"🔍 Strategy 0: Checking transaction receipt logs for WETH transfers in same tx {tx_hash[:16]}...")
+            logger.info(f"🔍 Strategy 0: WETH contract address: {WETH_CONTRACT}")
             try:
                 receipt = await self.get_transaction_receipt(tx_hash)
-                if receipt and receipt.get("logs"):
+                if not receipt:
+                    logger.warning(f"⚠️ Strategy 0: No receipt returned for tx {tx_hash[:16]}...")
+                elif not receipt.get("logs"):
+                    logger.info(f"ℹ️ Strategy 0: Transaction has no logs (might be a simple transfer)")
+                else:
                     logs = receipt.get("logs", [])
+                    logger.info(f"🔍 Strategy 0: Found {len(logs)} log(s) in transaction")
                     weth_contract_lower = WETH_CONTRACT.lower()
                     # WETH Transfer event signature: Transfer(address indexed from, address indexed to, uint256 value)
                     # Event signature hash: keccak256("Transfer(address,address,uint256)") = 0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef
                     transfer_event_topic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
                     
-                    for log in logs:
-                        # Check if this is a WETH contract log
+                    weth_logs_found = 0
+                    for i, log in enumerate(logs):
                         log_address = log.get("address", "").lower()
+                        # Check if this is a WETH contract log
                         if log_address == weth_contract_lower:
+                            weth_logs_found += 1
+                            logger.info(f"🔍 Strategy 0: Found WETH contract log #{weth_logs_found} (log {i+1}/{len(logs)})")
                             # Check if this is a Transfer event
                             topics = log.get("topics", [])
-                            if topics and len(topics) >= 3 and topics[0].lower() == transfer_event_topic:
-                                # Extract from, to, and value from log
-                                from_addr = "0x" + topics[1][-40:] if len(topics[1]) >= 42 else topics[1]
-                                to_addr = "0x" + topics[2][-40:] if len(topics[2]) >= 42 else topics[2]
-                                value_hex = log.get("data", "0x0")
-                                
-                                # Check if this transfer is to the seller
-                                if seller_lower and to_addr.lower() == seller_lower:
-                                    try:
-                                        weth_amount = int(value_hex, 16) if value_hex != "0x0" else 0
-                                        if weth_amount > 0:
-                                            weth_total += weth_amount
-                                            logger.info(f"✅ Found WETH in same tx (from logs): {weth_amount / (10**18):.6f} WETH to seller {seller_lower[:10]}...")
-                                    except (ValueError, TypeError):
-                                        pass
+                            if topics and len(topics) >= 3:
+                                event_topic = topics[0].lower()
+                                if event_topic == transfer_event_topic:
+                                    # Extract from, to, and value from log
+                                    from_addr = "0x" + topics[1][-40:] if len(topics[1]) >= 42 else topics[1]
+                                    to_addr = "0x" + topics[2][-40:] if len(topics[2]) >= 42 else topics[2]
+                                    value_hex = log.get("data", "0x0")
+                                    
+                                    logger.info(f"🔍 Strategy 0: WETH Transfer - from: {from_addr[:10]}..., to: {to_addr[:10]}..., value: {value_hex[:20]}...")
+                                    logger.info(f"🔍 Strategy 0: Checking if to_addr ({to_addr.lower()[:10]}...) matches seller ({seller_lower[:10] if seller_lower else 'None'}...)")
+                                    
+                                    # Check if this transfer is to the seller
+                                    if seller_lower and to_addr.lower() == seller_lower:
+                                        try:
+                                            weth_amount = int(value_hex, 16) if value_hex != "0x0" else 0
+                                            if weth_amount > 0:
+                                                weth_total += weth_amount
+                                                logger.info(f"✅ Strategy 0: Found WETH in same tx (from logs): {weth_amount / (10**18):.6f} WETH to seller {seller_lower[:10]}...")
+                                        except (ValueError, TypeError) as e:
+                                            logger.warning(f"⚠️ Strategy 0: Could not parse WETH amount: {e}")
+                                    else:
+                                        logger.info(f"⚠️ Strategy 0: WETH transfer to_addr ({to_addr.lower()[:10]}...) does not match seller ({seller_lower[:10] if seller_lower else 'None'}...)")
+                    
+                    if weth_logs_found == 0:
+                        logger.info(f"ℹ️ Strategy 0: No WETH contract logs found in transaction (checked {len(logs)} log(s))")
+                    elif weth_total == 0:
+                        logger.info(f"ℹ️ Strategy 0: Found {weth_logs_found} WETH contract log(s), but no matching transfers to seller")
             except Exception as e:
-                logger.debug(f"Could not check transaction receipt for WETH: {e}")
+                logger.error(f"❌ Strategy 0: Error checking transaction receipt for WETH: {e}", exc_info=True)
             
             if weth_total > 0:
                 logger.info(f"✅ Found WETH transfer in same transaction: {weth_total / (10**18):.6f} WETH for tx {tx_hash[:16]}...")
