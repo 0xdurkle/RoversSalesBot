@@ -180,9 +180,9 @@ def create_sale_embed(sale: SaleEvent, image_urls: List[str]) -> discord.Embed:
                     # Don't set embed image for Cloudinary - we'll attach as file
                     # Setting it here would just cause Discord to fail silently
                     logger.info("⚠ Skipping embed.set_image() for Cloudinary URL - will use file attachment")
-                    # Return early - don't set embed image for Cloudinary URLs
+                    # Continue - don't set embed image for Cloudinary URLs
                     # The image will be downloaded and attached as a file in the calling code
-                    return
+                    # Don't return - we need to continue to add other fields to the embed
                 elif "nft-cdn.alchemy.com" in image_url:
                     logger.info(f"✓ Using Alchemy CDN URL (should work): {image_url[:100]}...")
                 else:
@@ -780,8 +780,17 @@ async def lastsale(interaction: discord.Interaction):
         logger.info(f"Last sale command executed by {interaction.user}")
         
     except Exception as e:
-        logger.error(f"Error in lastsale command: {e}", exc_info=True)
-        await interaction.followup.send("Error fetching last sale. Please try again later.")
+        logger.error(f"❌ Error in lastsale command: {e}", exc_info=True)
+        error_msg = f"Error fetching last sale: {str(e)[:200]}"
+        try:
+            await interaction.followup.send(error_msg)
+        except Exception as send_error:
+            logger.error(f"❌ Failed to send error message: {send_error}")
+            # Try sending a generic message
+            try:
+                await interaction.followup.send("Error fetching last sale. Please try again later.")
+            except:
+                pass
 
 
 async def health_check(request: web.Request) -> web.Response:
