@@ -1116,19 +1116,17 @@ class SalesFetcher:
                 'Referer': 'https://alchemy.com/',
             }
             
-            # For Cloudinary URLs, try to fix common issues
+            # For Cloudinary URLs, add specific headers and handle redirects
             if 'cloudinary.com' in image_url:
-                # Ensure URL is complete - sometimes they're truncated
-                if not image_url.endswith(('.png', '.jpg', '.jpeg', '.gif', '.webp', '.mp4')):
-                    # Try to append common Cloudinary transformations if missing
-                    if '/f_png' in image_url and '/thumbn' in image_url:
-                        # This looks like a thumbnail URL that might be incomplete
-                        logger.debug(f"Cloudinary URL might be incomplete: {image_url[:100]}...")
+                logger.info(f"📥 Downloading from Cloudinary: {image_url[:100]}...")
+                # Cloudinary URLs may need specific headers
+                headers['Referer'] = 'https://alchemy.com/'
+                headers['Origin'] = 'https://alchemy.com/'
             
             async with session.get(
                 image_url,
                 headers=headers,
-                timeout=aiohttp.ClientTimeout(total=15),
+                timeout=aiohttp.ClientTimeout(total=20),  # Longer timeout for Cloudinary
                 allow_redirects=True
             ) as response:
                 if response.status == 200:
@@ -1144,6 +1142,11 @@ class SalesFetcher:
                         if len(image_data) > max_size:
                             logger.warning(f"Image too large ({len(image_data)} bytes), stopping download")
                             return None
+                    
+                    # Check if it's actually a video file (we don't want videos)
+                    if 'video' in content_type.lower():
+                        logger.warning(f"⚠️ URL returned video content (Content-Type: {content_type}), skipping")
+                        return None
                     
                     # Basic validation - check if it looks like image data
                     if len(image_data) < 100:
