@@ -394,18 +394,36 @@ async def process_webhook_events_grouped(tx_hash: str, events: List[dict]):
             is_cloudinary = 'cloudinary.com' in embed_url
             
             if is_cloudinary:
-                logger.info(f"📥 MUST download Cloudinary image (Discord can't fetch these URLs): {embed_url[:80]}...")
-                # Try multiple Cloudinary URL variations if first fails
-                urls_to_try = [embed_url]
-                # Try thumbnail URL if we have it
-                if len(image_urls) > 1:
-                    urls_to_try.append(image_urls[1])
-                # Try constructing alternative Cloudinary URLs
-                if '/f_png' in embed_url:
-                    # Try without f_png transformation
-                    alt_url = embed_url.replace('/f_png,so_0/', '/').replace('/f_png/', '/')
-                    if alt_url != embed_url:
-                        urls_to_try.append(alt_url)
+                    logger.info(f"📥 MUST download Cloudinary image (Discord can't fetch these URLs): {embed_url[:80]}...")
+                    # Try multiple Cloudinary URL variations if first fails
+                    urls_to_try = [embed_url]
+                    
+                    # Also try to get pngUrl from metadata if available (different Cloudinary URL)
+                    try:
+                        if token_ids and len(token_ids) > 0:
+                            metadata = await sales_fetcher.get_nft_metadata(token_ids[0])
+                            if metadata:
+                                top_image = metadata.get("image", {})
+                                if isinstance(top_image, dict):
+                                    png_url = top_image.get("pngUrl")
+                                    if png_url and isinstance(png_url, str) and 'cloudinary.com' in png_url:
+                                        if png_url not in urls_to_try:
+                                            urls_to_try.append(png_url)
+                                            logger.info(f"📥 Added pngUrl from metadata to try list: {png_url[:80]}...")
+                    except Exception as e:
+                        logger.debug(f"Could not fetch pngUrl from metadata: {e}")
+                    
+                    # Try thumbnail URL if we have it
+                    if len(image_urls) > 1:
+                        if image_urls[1] not in urls_to_try:
+                            urls_to_try.append(image_urls[1])
+                    
+                    # Try constructing alternative Cloudinary URLs
+                    if '/f_png' in embed_url:
+                        # Try without f_png transformation
+                        alt_url = embed_url.replace('/f_png,so_0/', '/').replace('/f_png/', '/')
+                        if alt_url != embed_url and alt_url not in urls_to_try:
+                            urls_to_try.append(alt_url)
             else:
                 logger.info(f"📥 Attempting to download image for file attachment: {embed_url[:80]}...")
                 urls_to_try = [embed_url]
@@ -813,18 +831,36 @@ async def lastsale(interaction: discord.Interaction):
             is_cloudinary = 'cloudinary.com' in embed_url
             
             if is_cloudinary:
-                logger.info(f"📥 MUST download Cloudinary image (Discord can't fetch these URLs): {embed_url[:80]}...")
-                # Try multiple Cloudinary URL variations if first fails
-                urls_to_try = [embed_url]
-                # Try thumbnail URL if we have it
-                if len(image_urls) > 1:
-                    urls_to_try.append(image_urls[1])
-                # Try constructing alternative Cloudinary URLs
-                if '/f_png' in embed_url:
-                    # Try without f_png transformation
-                    alt_url = embed_url.replace('/f_png,so_0/', '/').replace('/f_png/', '/')
-                    if alt_url != embed_url:
-                        urls_to_try.append(alt_url)
+                    logger.info(f"📥 MUST download Cloudinary image (Discord can't fetch these URLs): {embed_url[:80]}...")
+                    # Try multiple Cloudinary URL variations if first fails
+                    urls_to_try = [embed_url]
+                    
+                    # Also try to get pngUrl from metadata if available (different Cloudinary URL)
+                    try:
+                        if token_ids and len(token_ids) > 0:
+                            metadata = await sales_fetcher.get_nft_metadata(token_ids[0])
+                            if metadata:
+                                top_image = metadata.get("image", {})
+                                if isinstance(top_image, dict):
+                                    png_url = top_image.get("pngUrl")
+                                    if png_url and isinstance(png_url, str) and 'cloudinary.com' in png_url:
+                                        if png_url not in urls_to_try:
+                                            urls_to_try.append(png_url)
+                                            logger.info(f"📥 Added pngUrl from metadata to try list: {png_url[:80]}...")
+                    except Exception as e:
+                        logger.debug(f"Could not fetch pngUrl from metadata: {e}")
+                    
+                    # Try thumbnail URL if we have it
+                    if len(image_urls) > 1:
+                        if image_urls[1] not in urls_to_try:
+                            urls_to_try.append(image_urls[1])
+                    
+                    # Try constructing alternative Cloudinary URLs
+                    if '/f_png' in embed_url:
+                        # Try without f_png transformation
+                        alt_url = embed_url.replace('/f_png,so_0/', '/').replace('/f_png/', '/')
+                        if alt_url != embed_url and alt_url not in urls_to_try:
+                            urls_to_try.append(alt_url)
             else:
                 logger.info(f"📥 Attempting to download image for file attachment: {embed_url[:80]}...")
                 urls_to_try = [embed_url]
