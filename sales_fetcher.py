@@ -245,23 +245,6 @@ class SalesFetcher:
         
         return metadata
     
-    def construct_alchemy_cdn_url(self, token_id: str) -> Optional[str]:
-        """
-        Construct Alchemy CDN URL directly from token ID.
-        This is a fallback when cachedUrl is not available.
-        
-        Format: https://nft-cdn.alchemy.com/eth-mainnet/{contract_hash}
-        
-        Args:
-            token_id: Token ID
-            
-        Returns:
-            Alchemy CDN URL or None if can't construct
-        """
-        # This is a fallback - we can't construct the hash without the metadata
-        # But we can try to get it from the metadata if available
-        return None
-    
     async def get_current_block(self) -> int:
         """
         Get current block number.
@@ -276,7 +259,8 @@ class SalesFetcher:
     
     async def _get_transaction_price_simple(
         self,
-        tx_hash: str
+        tx_hash: str,
+        seller_address: Optional[str] = None
     ) -> Tuple[int, bool]:
         """
         Get transaction price in wei.
@@ -284,6 +268,7 @@ class SalesFetcher:
         
         Args:
             tx_hash: Transaction hash
+            seller_address: Seller address (to match WETH transfers to seller)
             
         Returns:
             Tuple of (price in wei, is_weth: bool)
@@ -326,6 +311,8 @@ class SalesFetcher:
             transfers_list = transfers.get("transfers", [])
             
             # Filter transfers for this specific transaction
+            # WETH payment goes TO the seller, so check "to" address matches seller
+            seller_lower = seller_address.lower() if seller_address else None
             for transfer in transfers_list:
                 transfer_hash = transfer.get("hash", "")
                 if transfer_hash and transfer_hash.lower() == tx_hash.lower():
@@ -333,7 +320,16 @@ class SalesFetcher:
                     value_hex = transfer.get("value", "0x0")
                     if value_hex and value_hex != "0x0":
                         try:
-                            weth_total += int(value_hex, 16)
+                            weth_amount = int(value_hex, 16)
+                            # If we have seller address, verify WETH goes to seller
+                            if seller_lower:
+                                transfer_to = transfer.get("to", "").lower()
+                                if transfer_to == seller_lower:
+                                    weth_total += weth_amount
+                                    logger.debug(f"Found WETH transfer to seller {seller_lower[:10]}...: {weth_amount / (10**18):.6f} WETH")
+                            else:
+                                # No seller address, just sum all WETH transfers in this tx
+                                weth_total += weth_amount
                         except (ValueError, TypeError):
                             pass
             
@@ -1297,79 +1293,6 @@ class SalesFetcher:
             logger.error(f"Error in extract_video_frame: {e}", exc_info=True)
             return None
     
-    async def download_image_with_fallbacks(self, token_id: str, max_time: float = 5.0) -> Optional[bytes]:
-        """
-        Download image for a token, trying all available URLs in priority order.
-        Also tries alternative thumbnail URLs if primary URLs fail.
-        
-        Args:
-            token_id: Token ID to download image for
-            max_time: Maximum time to spend downloading (seconds)
-            
-        Returns:
-            Image bytes, or None if all downloads fail
-        """
-        try:
-            # Get URLs with timeout
-            urls = await asyncio.wait_for(
-                self.get_all_image_urls_for_token(token_id),
-                timeout=2.0  # Quick timeout for URL fetching
-            )
-        except asyncio.TimeoutError:
-            logger.warning(f"Timeout getting image URLs for token {token_id}")
-            return None
-        
-        if not urls:
-            logger.warning(f"No image URLs found for token {token_id}")
-            return None
-        
-        # Try all primary URLs first (with overall timeout)
-        # Skip Cloudinary URLs for file downloads (they often return 400)
-        # Prefer smaller thumbnail URLs for file attachments
-        start_time = asyncio.get_event_loop().time()
-        for i, url in enumerate(urls):
-            # Check if we've exceeded max time
-            elapsed = asyncio.get_event_loop().time() - start_time
-            if elapsed > max_time:
-                logger.warning(f"Image download timeout for token {token_id} after {elapsed:.1f}s")
-                break
-            
-            # Skip Cloudinary URLs for file downloads - they often return 400
-            # Use them for embed images only (which we already do in fetch_nft_images)
-            if 'cloudinary.com' in url:
-                logger.debug(f"Skipping Cloudinary URL for file download (often returns 400): {url[:80]}...")
-                continue
-            
-            logger.info(f"Trying image URL {i+1}/{len(urls)} for token {token_id}: {url[:80]}...")
-            image_data = await self.download_image(url)
-            if image_data:
-                logger.info(f"Successfully downloaded image from URL {i+1} for token {token_id}")
-                return image_data
-        
-        # If all primary URLs failed, try to construct alternative thumbnail URLs
-        # from Alchemy CDN URLs
-        logger.info(f"Primary URLs failed, trying alternative thumbnail URLs for token {token_id}")
-        for url in urls:
-            if 'nft-cdn.alchemy.com' in url:
-                # Try to get metadata to construct a thumbnail URL
-                try:
-                    metadata = await self.get_nft_metadata(token_id)
-                    if metadata:
-                        # Try to use the embed image URL from fetch_nft_images
-                        # which might have better URL construction
-                        embed_urls = await self.fetch_nft_images([token_id], max_images=1)
-                        if embed_urls:
-                            logger.info(f"Trying embed image URL as fallback: {embed_urls[0][:80]}...")
-                            image_data = await self.download_image(embed_urls[0])
-                            if image_data:
-                                logger.info(f"Successfully downloaded image from embed URL for token {token_id}")
-                                return image_data
-                except Exception as e:
-                    logger.debug(f"Error trying alternative URLs: {e}")
-        
-        logger.warning(f"Failed to download image from all {len(urls)} URL(s) for token {token_id}")
-        return None
-    
     async def fetch_last_n_sales(self, n: int = 1) -> List[SaleEvent]:
         """
         Fetch the last N sales for the collection.
@@ -1498,7 +1421,7 @@ class SalesFetcher:
                 # Check prices for all candidates in parallel (batch)
                 if transfer_candidates:
                     price_tasks = [
-                        self._get_transaction_price_simple(candidate["tx_hash"])
+                        self._get_transaction_price_simple(candidate["tx_hash"], candidate["from_addr"])
                         for candidate in transfer_candidates
                     ]
                     price_results = await asyncio.gather(*price_tasks, return_exceptions=True)
