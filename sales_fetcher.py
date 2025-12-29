@@ -571,12 +571,10 @@ class SalesFetcher:
         if not ipfs_hash:
             return None
         
-        # Try multiple IPFS gateways
+        # Try multiple IPFS gateways (Cloudflare first - fastest)
         gateways = [
             "https://cloudflare-ipfs.com/ipfs/",
             "https://ipfs.io/ipfs/",
-            "https://gateway.pinata.cloud/ipfs/",
-            "https://dweb.link/ipfs/",
         ]
         
         session = await self._get_session()
@@ -592,7 +590,7 @@ class SalesFetcher:
                 async with session.get(
                     url,
                     headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=10)
+                    timeout=aiohttp.ClientTimeout(total=2)  # Shorter timeout - 2 seconds max
                 ) as response:
                     if response.status == 200:
                         data = await response.json()
@@ -600,23 +598,44 @@ class SalesFetcher:
                         return data
                     else:
                         logger.debug(f"IPFS gateway {gateway} returned {response.status}")
+            except asyncio.TimeoutError:
+                logger.debug(f"IPFS gateway {gateway} timed out")
+                continue
             except Exception as e:
                 logger.debug(f"Failed to fetch from {gateway}: {e}")
                 continue
         
-        logger.warning(f"Failed to fetch metadata from IPFS hash: {ipfs_hash}")
+        logger.debug(f"Failed to fetch metadata from IPFS hash: {ipfs_hash}")
         return None
     
-    async def get_ipfs_image_urls(self, token_id: str) -> List[str]:
+    async def get_ipfs_image_urls(self, token_id: str, timeout: float = 3.0) -> List[str]:
         """
         Get image URLs directly from IPFS by fetching the metadata JSON.
         This bypasses Alchemy's CDN and goes straight to the source.
         
         Args:
             token_id: Token ID to get IPFS image for
+            timeout: Maximum time to spend fetching from IPFS (seconds)
             
         Returns:
             List of IPFS image URLs (via gateways)
+        """
+        try:
+            # Use asyncio.wait_for to enforce timeout
+            return await asyncio.wait_for(
+                self._get_ipfs_image_urls_internal(token_id),
+                timeout=timeout
+            )
+        except asyncio.TimeoutError:
+            logger.warning(f"IPFS image fetch timed out for token {token_id} (>{timeout}s), skipping")
+            return []
+        except Exception as e:
+            logger.debug(f"Error in get_ipfs_image_urls for token {token_id}: {e}")
+            return []
+    
+    async def _get_ipfs_image_urls_internal(self, token_id: str) -> List[str]:
+        """
+        Internal method to get IPFS image URLs (without timeout wrapper).
         """
         try:
             # First, get metadata from Alchemy to find the tokenURI/IPFS hash
@@ -943,24 +962,41 @@ class SalesFetcher:
             logger.error(f"Error downloading image from {image_url[:60]}...: {e}")
             return None
     
-    async def download_image_with_fallbacks(self, token_id: str) -> Optional[bytes]:
+    async def download_image_with_fallbacks(self, token_id: str, max_time: float = 5.0) -> Optional[bytes]:
         """
         Download image for a token, trying all available URLs in priority order.
         Also tries alternative thumbnail URLs if primary URLs fail.
         
         Args:
             token_id: Token ID to download image for
+            max_time: Maximum time to spend downloading (seconds)
             
         Returns:
             Image bytes, or None if all downloads fail
         """
-        urls = await self.get_all_image_urls_for_token(token_id)
+        try:
+            # Get URLs with timeout
+            urls = await asyncio.wait_for(
+                self.get_all_image_urls_for_token(token_id),
+                timeout=2.0  # Quick timeout for URL fetching
+            )
+        except asyncio.TimeoutError:
+            logger.warning(f"Timeout getting image URLs for token {token_id}")
+            return None
+        
         if not urls:
             logger.warning(f"No image URLs found for token {token_id}")
             return None
         
-        # Try all primary URLs first
+        # Try all primary URLs first (with overall timeout)
+        start_time = asyncio.get_event_loop().time()
         for i, url in enumerate(urls):
+            # Check if we've exceeded max time
+            elapsed = asyncio.get_event_loop().time() - start_time
+            if elapsed > max_time:
+                logger.warning(f"Image download timeout for token {token_id} after {elapsed:.1f}s")
+                break
+            
             logger.info(f"Trying image URL {i+1}/{len(urls)} for token {token_id}: {url[:80]}...")
             image_data = await self.download_image(url)
             if image_data:

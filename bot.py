@@ -293,8 +293,8 @@ async def process_webhook_events_grouped(tx_hash: str, events: List[dict]):
         file = None
         if token_ids and len(token_ids) > 0:
             try:
-                # Use the new function that tries all URLs in priority order
-                image_data = await sales_fetcher.download_image_with_fallbacks(token_ids[0])
+                # Use the new function that tries all URLs in priority order (5 second timeout)
+                image_data = await sales_fetcher.download_image_with_fallbacks(token_ids[0], max_time=5.0)
                 if image_data:
                     # Determine file extension from first successful URL
                     urls = await sales_fetcher.get_all_image_urls_for_token(token_ids[0])
@@ -487,8 +487,8 @@ async def lastsale(interaction: discord.Interaction):
         file = None
         if token_ids and len(token_ids) > 0:
             try:
-                # Use the new function that tries all URLs in priority order
-                image_data = await sales_fetcher.download_image_with_fallbacks(token_ids[0])
+                # Use the new function that tries all URLs in priority order (5 second timeout)
+                image_data = await sales_fetcher.download_image_with_fallbacks(token_ids[0], max_time=5.0)
                 if image_data:
                     # Determine file extension from first successful URL
                     # Get URLs to check extension
@@ -529,10 +529,16 @@ async def lastsale(interaction: discord.Interaction):
         await interaction.followup.send("Error fetching last sale. Please try again later.")
 
 
+async def health_check(request: web.Request) -> web.Response:
+    """Health check endpoint for Railway/webhook monitoring."""
+    return web.Response(text="OK", status=200)
+
 async def start_webhook_server():
     """Start aiohttp webhook server."""
     app = web.Application()
     app.router.add_post("/webhook", handle_alchemy_webhook)
+    app.router.add_get("/", health_check)  # Health check endpoint
+    app.router.add_get("/health", health_check)  # Alternative health check
     
     runner = web.AppRunner(app)
     await runner.setup()
@@ -540,6 +546,7 @@ async def start_webhook_server():
     await site.start()
     logger.info(f"Webhook server started on port {WEBHOOK_PORT}")
     logger.info("IPFS image fetching enabled - prioritizing direct IPFS URLs")
+    logger.info(f"Health check available at: http://0.0.0.0:{WEBHOOK_PORT}/health")
 
 
 async def main():
