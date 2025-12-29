@@ -315,21 +315,23 @@ class SalesFetcher:
             seller_lower = seller_address.lower() if seller_address else None
             for transfer in transfers_list:
                 transfer_hash = transfer.get("hash", "")
+                # Match by transaction hash
                 if transfer_hash and transfer_hash.lower() == tx_hash.lower():
                     # Get WETH amount
                     value_hex = transfer.get("value", "0x0")
                     if value_hex and value_hex != "0x0":
                         try:
                             weth_amount = int(value_hex, 16)
-                            # If we have seller address, verify WETH goes to seller
+                            # If we have seller address, verify WETH goes to seller (seller receives payment)
                             if seller_lower:
                                 transfer_to = transfer.get("to", "").lower()
                                 if transfer_to == seller_lower:
                                     weth_total += weth_amount
-                                    logger.debug(f"Found WETH transfer to seller {seller_lower[:10]}...: {weth_amount / (10**18):.6f} WETH")
+                                    logger.info(f"✅ Found WETH transfer to seller {seller_lower[:10]}...: {weth_amount / (10**18):.6f} WETH")
                             else:
                                 # No seller address, just sum all WETH transfers in this tx
                                 weth_total += weth_amount
+                                logger.debug(f"Found WETH transfer (no seller check): {weth_amount / (10**18):.6f} WETH")
                         except (ValueError, TypeError):
                             pass
             
@@ -793,31 +795,6 @@ class SalesFetcher:
         
         logger.debug(f"Failed to fetch metadata from IPFS hash: {ipfs_hash}")
         return None
-    
-    async def get_ipfs_image_urls(self, token_id: str, timeout: float = 3.0) -> List[str]:
-        """
-        Get image URLs directly from IPFS by fetching the metadata JSON.
-        This bypasses Alchemy's CDN and goes straight to the source.
-        
-        Args:
-            token_id: Token ID to get IPFS image for
-            timeout: Maximum time to spend fetching from IPFS (seconds)
-            
-        Returns:
-            List of IPFS image URLs (via gateways)
-        """
-        try:
-            # Use asyncio.wait_for to enforce timeout
-            return await asyncio.wait_for(
-                self._get_ipfs_image_urls_internal(token_id),
-                timeout=timeout
-            )
-        except asyncio.TimeoutError:
-            logger.warning(f"IPFS image fetch timed out for token {token_id} (>{timeout}s), skipping")
-            return []
-        except Exception as e:
-            logger.debug(f"Error in get_ipfs_image_urls for token {token_id}: {e}")
-            return []
     
     async def _get_ipfs_image_urls_internal(self, token_id: str) -> List[str]:
         """
