@@ -371,7 +371,7 @@ async def process_webhook_events_grouped(tx_hash: str, events: List[dict]):
                 f"in tx {tx_hash}"
             )
         else:
-            logger.error("Discord channel not available")
+            logger.error(f"Discord channel {DISCORD_CHANNEL_ID} not available - check bot is in server and has access")
         
         # Mark as processed
         processed_sales.add(tx_hash.lower())
