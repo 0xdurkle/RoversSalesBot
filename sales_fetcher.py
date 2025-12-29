@@ -1626,10 +1626,11 @@ class SalesFetcher:
                         price, is_weth = price_result
                         if price > 0:
                             logger.debug(f"Transfer {candidate['tx_hash'][:10]}... - Price: {price} wei ({'WETH' if is_weth else 'ETH'})")
-                        # Only log 0 price if DEBUG level is enabled (too noisy otherwise)
                         
                         if price == 0:
-                            logger.debug(f"Skipping transfer {candidate['tx_hash'][:10]}... - no price detected")
+                            # Log this at INFO level so we can see if WETH sales are being filtered out
+                            logger.info(f"⚠️ Skipping transfer {candidate['tx_hash'][:10]}... - no price detected (might be WETH sale that failed detection)")
+                            logger.info(f"⚠️   Seller: {candidate['from_addr'][:10] if candidate.get('from_addr') else 'None'}..., Buyer: {candidate['to_addr'][:10] if candidate.get('to_addr') else 'None'}...")
                             continue
                         
                         sale = SaleEvent(
