@@ -1215,6 +1215,83 @@ class SalesFetcher:
             logger.error(f"Error downloading image from {image_url[:60]}...: {e}")
             return None
     
+    async def extract_video_frame(self, video_url: str, token_id: str) -> Optional[bytes]:
+        """
+        Download video from IPFS and extract first frame as PNG image.
+        This is the most reliable way to get a thumbnail from video NFTs.
+        
+        Args:
+            video_url: IPFS video URL (e.g., https://ipfs.io/ipfs/HASH/TOKEN_ID.mp4)
+            token_id: Token ID for logging
+            
+        Returns:
+            PNG image bytes, or None if extraction fails
+        """
+        try:
+            import imageio
+            import tempfile
+            import os
+            
+            logger.info(f"🎬 Extracting frame from video: {video_url[:80]}...")
+            
+            # Download video to temporary file
+            session = await self._get_session()
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            }
+            
+            async with session.get(
+                video_url,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=30)  # Videos can be large
+            ) as response:
+                if response.status != 200:
+                    logger.warning(f"Failed to download video: HTTP {response.status}")
+                    return None
+                
+                # Download video to temp file
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as temp_video:
+                    video_data = await response.read()
+                    # Limit video size to 50MB to avoid memory issues
+                    if len(video_data) > 50 * 1024 * 1024:
+                        logger.warning(f"Video too large ({len(video_data)} bytes), skipping frame extraction")
+                        return None
+                    temp_video.write(video_data)
+                    temp_video_path = temp_video.name
+                
+                try:
+                    # Extract first frame using imageio
+                    reader = imageio.get_reader(temp_video_path)
+                    frame = reader.get_data(0)  # Get first frame
+                    reader.close()
+                    
+                    # Convert frame to PNG bytes
+                    with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as temp_image:
+                        imageio.imwrite(temp_image.name, frame, format='PNG')
+                        with open(temp_image.name, 'rb') as f:
+                            image_bytes = f.read()
+                        os.unlink(temp_image.name)  # Clean up
+                    
+                    logger.info(f"✅ Successfully extracted frame: {len(image_bytes)} bytes")
+                    return image_bytes
+                    
+                except Exception as e:
+                    logger.error(f"Error extracting frame from video: {e}", exc_info=True)
+                    return None
+                finally:
+                    # Clean up temp video file
+                    try:
+                        os.unlink(temp_video_path)
+                    except:
+                        pass
+                        
+        except ImportError:
+            logger.error("imageio not installed - cannot extract video frames. Install with: pip install imageio imageio-ffmpeg")
+            return None
+        except Exception as e:
+            logger.error(f"Error in extract_video_frame: {e}", exc_info=True)
+            return None
+    
     async def download_image_with_fallbacks(self, token_id: str, max_time: float = 5.0) -> Optional[bytes]:
         """
         Download image for a token, trying all available URLs in priority order.

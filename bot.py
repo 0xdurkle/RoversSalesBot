@@ -465,63 +465,37 @@ async def process_webhook_events_grouped(tx_hash: str, events: List[dict]):
                         logger.info(f"🔄 Trying next URL...")
                     continue
             
-            # If all Cloudinary URLs failed, try IPFS fallback
+            # If all Cloudinary URLs failed, extract frame from video (MOST RELIABLE)
             if not image_data and is_cloudinary and token_ids:
-                logger.warning(f"⚠️ All Cloudinary URLs failed, trying IPFS fallback...")
+                logger.warning(f"⚠️ All Cloudinary URLs failed, extracting frame from video...")
                 try:
-                    # First, try to get IPFS hash from metadata and construct direct image URL
-                    # Pattern: https://ipfs.io/ipfs/HASH/TOKEN_ID.mp4 -> try HASH/TOKEN_ID.png
+                    # Get video URL from metadata
                     metadata = await sales_fetcher.get_nft_metadata(token_ids[0])
                     if metadata:
                         top_image = metadata.get("image", {})
                         if isinstance(top_image, dict):
                             original_url = top_image.get("originalUrl", "")
-                            if original_url and '/ipfs/' in original_url:
-                                result = sales_fetcher._extract_ipfs_hash_from_video_url(original_url)
-                                if result:
-                                    ipfs_hash, token_id_from_url = result
-                                    logger.info(f"🔄 Extracted IPFS hash: {ipfs_hash[:20]}..., token ID: {token_id_from_url}")
-                                    # Try common image extensions directly from IPFS
-                                    for ext in ['png', 'jpg', 'jpeg', 'gif', 'webp']:
-                                        test_url = f"https://ipfs.io/ipfs/{ipfs_hash}/{token_id_from_url}.{ext}"
-                                        logger.info(f"🔄 Trying direct IPFS image URL: {test_url[:80]}...")
-                                        test_data = await sales_fetcher.download_image(test_url)
-                                        if test_data:
-                                            file = discord.File(
-                                                io.BytesIO(test_data),
-                                                filename=f"nft_{token_id_from_url}.{ext}"
-                                            )
-                                            image_data = test_data
-                                            logger.info(f"✅ Successfully downloaded IPFS image: {len(test_data)} bytes")
-                                            break
-                                    if image_data:
-                                        # Success - skip metadata fallback
-                                        pass
-                                    else:
-                                        logger.warning(f"⚠️ Direct IPFS image URLs failed, trying metadata fallback...")
-                    
-                    # If direct IPFS URLs failed, try metadata-based approach
-                    if not image_data:
-                        ipfs_urls = await sales_fetcher.get_ipfs_image_urls(token_ids[0], timeout=5.0)
-                        if ipfs_urls:
-                            logger.info(f"✅ Found {len(ipfs_urls)} IPFS image URL(s) from metadata, trying first one...")
-                            ipfs_image_data = await sales_fetcher.download_image(ipfs_urls[0])
-                            if ipfs_image_data:
-                                ext = "png"
-                                if ".jpg" in ipfs_urls[0].lower() or ".jpeg" in ipfs_urls[0].lower():
-                                    ext = "jpg"
-                                file = discord.File(
-                                    io.BytesIO(ipfs_image_data),
-                                    filename=f"nft_{sale.token_id or 'image'}.{ext}"
-                                )
-                                image_data = ipfs_image_data
-                                logger.info(f"✅ Successfully downloaded IPFS image from metadata: {len(ipfs_image_data)} bytes")
+                            if original_url and '/ipfs/' in original_url and ('.mp4' in original_url.lower() or 'video' in original_url.lower()):
+                                logger.info(f"🎬 Found video URL: {original_url[:80]}...")
+                                # Extract frame from video
+                                frame_data = await sales_fetcher.extract_video_frame(original_url, token_ids[0])
+                                if frame_data:
+                                    file = discord.File(
+                                        io.BytesIO(frame_data),
+                                        filename=f"nft_{sale.token_id or 'image'}.png"
+                                    )
+                                    image_data = frame_data
+                                    logger.info(f"✅ Successfully extracted frame from video: {len(frame_data)} bytes")
+                                else:
+                                    logger.warning(f"⚠️ Frame extraction failed")
                             else:
-                                logger.warning(f"⚠️ IPFS image download from metadata also failed")
+                                logger.warning(f"⚠️ No video URL found in metadata")
                         else:
-                            logger.warning(f"⚠️ No IPFS image URLs found from metadata")
-                except Exception as ipfs_error:
-                    logger.warning(f"⚠️ IPFS fallback failed: {ipfs_error}")
+                            logger.warning(f"⚠️ Image metadata is not a dict")
+                    else:
+                        logger.warning(f"⚠️ Could not fetch metadata for video extraction")
+                except Exception as video_error:
+                    logger.warning(f"⚠️ Video frame extraction failed: {video_error}")
             
             if not image_data:
                 if is_cloudinary:
@@ -902,63 +876,37 @@ async def lastsale(interaction: discord.Interaction):
                         logger.info(f"🔄 Trying next URL...")
                     continue
             
-            # If all Cloudinary URLs failed, try IPFS fallback
+            # If all Cloudinary URLs failed, extract frame from video (MOST RELIABLE)
             if not image_data and is_cloudinary and token_ids:
-                logger.warning(f"⚠️ All Cloudinary URLs failed, trying IPFS fallback...")
+                logger.warning(f"⚠️ All Cloudinary URLs failed, extracting frame from video...")
                 try:
-                    # First, try to get IPFS hash from metadata and construct direct image URL
-                    # Pattern: https://ipfs.io/ipfs/HASH/TOKEN_ID.mp4 -> try HASH/TOKEN_ID.png
+                    # Get video URL from metadata
                     metadata = await sales_fetcher.get_nft_metadata(token_ids[0])
                     if metadata:
                         top_image = metadata.get("image", {})
                         if isinstance(top_image, dict):
                             original_url = top_image.get("originalUrl", "")
-                            if original_url and '/ipfs/' in original_url:
-                                result = sales_fetcher._extract_ipfs_hash_from_video_url(original_url)
-                                if result:
-                                    ipfs_hash, token_id_from_url = result
-                                    logger.info(f"🔄 Extracted IPFS hash: {ipfs_hash[:20]}..., token ID: {token_id_from_url}")
-                                    # Try common image extensions directly from IPFS
-                                    for ext in ['png', 'jpg', 'jpeg', 'gif', 'webp']:
-                                        test_url = f"https://ipfs.io/ipfs/{ipfs_hash}/{token_id_from_url}.{ext}"
-                                        logger.info(f"🔄 Trying direct IPFS image URL: {test_url[:80]}...")
-                                        test_data = await sales_fetcher.download_image(test_url)
-                                        if test_data:
-                                            file = discord.File(
-                                                io.BytesIO(test_data),
-                                                filename=f"nft_{token_id_from_url}.{ext}"
-                                            )
-                                            image_data = test_data
-                                            logger.info(f"✅ Successfully downloaded IPFS image: {len(test_data)} bytes")
-                                            break
-                                    if image_data:
-                                        # Success - skip metadata fallback
-                                        pass
-                                    else:
-                                        logger.warning(f"⚠️ Direct IPFS image URLs failed, trying metadata fallback...")
-                    
-                    # If direct IPFS URLs failed, try metadata-based approach
-                    if not image_data:
-                        ipfs_urls = await sales_fetcher.get_ipfs_image_urls(token_ids[0], timeout=5.0)
-                        if ipfs_urls:
-                            logger.info(f"✅ Found {len(ipfs_urls)} IPFS image URL(s) from metadata, trying first one...")
-                            ipfs_image_data = await sales_fetcher.download_image(ipfs_urls[0])
-                            if ipfs_image_data:
-                                ext = "png"
-                                if ".jpg" in ipfs_urls[0].lower() or ".jpeg" in ipfs_urls[0].lower():
-                                    ext = "jpg"
-                                file = discord.File(
-                                    io.BytesIO(ipfs_image_data),
-                                    filename=f"nft_{sale.token_id or 'image'}.{ext}"
-                                )
-                                image_data = ipfs_image_data
-                                logger.info(f"✅ Successfully downloaded IPFS image from metadata: {len(ipfs_image_data)} bytes")
+                            if original_url and '/ipfs/' in original_url and ('.mp4' in original_url.lower() or 'video' in original_url.lower()):
+                                logger.info(f"🎬 Found video URL: {original_url[:80]}...")
+                                # Extract frame from video
+                                frame_data = await sales_fetcher.extract_video_frame(original_url, token_ids[0])
+                                if frame_data:
+                                    file = discord.File(
+                                        io.BytesIO(frame_data),
+                                        filename=f"nft_{sale.token_id or 'image'}.png"
+                                    )
+                                    image_data = frame_data
+                                    logger.info(f"✅ Successfully extracted frame from video: {len(frame_data)} bytes")
+                                else:
+                                    logger.warning(f"⚠️ Frame extraction failed")
                             else:
-                                logger.warning(f"⚠️ IPFS image download from metadata also failed")
+                                logger.warning(f"⚠️ No video URL found in metadata")
                         else:
-                            logger.warning(f"⚠️ No IPFS image URLs found from metadata")
-                except Exception as ipfs_error:
-                    logger.warning(f"⚠️ IPFS fallback failed: {ipfs_error}")
+                            logger.warning(f"⚠️ Image metadata is not a dict")
+                    else:
+                        logger.warning(f"⚠️ Could not fetch metadata for video extraction")
+                except Exception as video_error:
+                    logger.warning(f"⚠️ Video frame extraction failed: {video_error}")
             
             if not image_data:
                 if is_cloudinary:
