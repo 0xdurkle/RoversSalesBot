@@ -384,54 +384,100 @@ async def process_webhook_events_grouped(tx_hash: str, events: List[dict]):
         # Create embed with the image URL
         embed = create_sale_embed(sale, image_urls)
         
-        # Download image for file attachment - CRITICAL for Cloudinary URLs
-        # Discord can't fetch Cloudinary URLs, so we must download and attach as file
+        # Download image for file attachment - REQUIRED for Cloudinary URLs
+        # Discord can't fetch Cloudinary URLs, so we MUST download and attach as file
         file = None
         image_data = None
         is_cloudinary = False
         if token_ids and len(token_ids) > 0 and image_urls:
-            try:
-                # Use the URL we already fetched - don't make more API calls!
-                embed_url = image_urls[0]
-                is_cloudinary = 'cloudinary.com' in embed_url
-                
-                if is_cloudinary:
-                    logger.info(f"📥 Downloading Cloudinary image (Discord can't fetch these URLs): {embed_url[:80]}...")
-                else:
-                    logger.info(f"📥 Attempting to download image from embed URL: {embed_url[:80]}...")
-                
-                # Download the image - we MUST do this for Cloudinary URLs
-                image_data = await sales_fetcher.download_image(embed_url)
-                if image_data:
-                    # Determine file extension from URL or content type
-                    ext = "png"  # Default
-                    url_lower = embed_url.lower()
-                    if ".jpg" in url_lower or ".jpeg" in url_lower:
-                        ext = "jpg"
-                    elif ".gif" in url_lower:
-                        ext = "gif"
-                    elif ".webp" in url_lower:
-                        ext = "webp"
-                    elif ".png" in url_lower or "f_png" in url_lower:
-                        ext = "png"
-                    
-                    file = discord.File(
-                        io.BytesIO(image_data),
-                        filename=f"nft_{sale.token_id or 'image'}.{ext}"
-                    )
-                    logger.info(f"✅ Successfully downloaded image: {len(image_data)} bytes, extension: {ext}")
-                    if is_cloudinary:
-                        logger.info(f"✅ Cloudinary image downloaded - will attach as file (Discord can't fetch Cloudinary URLs)")
-                else:
-                    if is_cloudinary:
-                        logger.warning(f"⚠️ Failed to download Cloudinary image - Discord won't be able to display it")
+            embed_url = image_urls[0]
+            is_cloudinary = 'cloudinary.com' in embed_url
+            
+            if is_cloudinary:
+                logger.info(f"📥 MUST download Cloudinary image (Discord can't fetch these URLs): {embed_url[:80]}...")
+                # Try multiple Cloudinary URL variations if first fails
+                urls_to_try = [embed_url]
+                # Try thumbnail URL if we have it
+                if len(image_urls) > 1:
+                    urls_to_try.append(image_urls[1])
+                # Try constructing alternative Cloudinary URLs
+                if '/f_png' in embed_url:
+                    # Try without f_png transformation
+                    alt_url = embed_url.replace('/f_png,so_0/', '/').replace('/f_png/', '/')
+                    if alt_url != embed_url:
+                        urls_to_try.append(alt_url)
+            else:
+                logger.info(f"📥 Attempting to download image for file attachment: {embed_url[:80]}...")
+                urls_to_try = [embed_url]
+            
+            # Try downloading from multiple URLs
+            for attempt, url_to_try in enumerate(urls_to_try, 1):
+                try:
+                    logger.info(f"📥 Attempt {attempt}/{len(urls_to_try)}: Downloading from {url_to_try[:80]}...")
+                    # Download the image - CRITICAL for Cloudinary URLs
+                    image_data = await sales_fetcher.download_image(url_to_try)
+                    if image_data:
+                        # Determine file extension from URL or content type
+                        ext = "png"  # Default
+                        url_lower = url_to_try.lower()
+                        if ".jpg" in url_lower or ".jpeg" in url_lower:
+                            ext = "jpg"
+                        elif ".gif" in url_lower:
+                            ext = "gif"
+                        elif ".webp" in url_lower:
+                            ext = "webp"
+                        elif ".png" in url_lower or "f_png" in url_lower:
+                            ext = "png"
+                        
+                        file = discord.File(
+                            io.BytesIO(image_data),
+                            filename=f"nft_{sale.token_id or 'image'}.{ext}"
+                        )
+                        logger.info(f"✅ Successfully downloaded image: {len(image_data)} bytes, extension: {ext}")
+                        if is_cloudinary:
+                            logger.info(f"✅ Cloudinary image downloaded - will attach as file (Discord can't fetch Cloudinary URLs)")
+                        break  # Success - stop trying other URLs
                     else:
-                        logger.debug(f"Could not download image from embed URL (may be too large)")
-            except Exception as e:
+                        logger.warning(f"⚠️ Attempt {attempt} failed: No image data returned from {url_to_try[:80]}...")
+                        if attempt < len(urls_to_try):
+                            logger.info(f"🔄 Trying next URL...")
+                except Exception as e:
+                    logger.warning(f"⚠️ Attempt {attempt} failed: {e}")
+                    if attempt < len(urls_to_try):
+                        logger.info(f"🔄 Trying next URL...")
+                    continue
+            
+            # If all Cloudinary URLs failed, try IPFS fallback
+            if not image_data and is_cloudinary and token_ids:
+                logger.warning(f"⚠️ All Cloudinary URLs failed, trying IPFS metadata fallback...")
+                try:
+                    ipfs_urls = await sales_fetcher.get_ipfs_image_urls(token_ids[0], timeout=5.0)
+                    if ipfs_urls:
+                        logger.info(f"✅ Found {len(ipfs_urls)} IPFS image URL(s), trying first one...")
+                        ipfs_image_data = await sales_fetcher.download_image(ipfs_urls[0])
+                        if ipfs_image_data:
+                            ext = "png"
+                            if ".jpg" in ipfs_urls[0].lower() or ".jpeg" in ipfs_urls[0].lower():
+                                ext = "jpg"
+                            file = discord.File(
+                                io.BytesIO(ipfs_image_data),
+                                filename=f"nft_{sale.token_id or 'image'}.{ext}"
+                            )
+                            image_data = ipfs_image_data
+                            logger.info(f"✅ Successfully downloaded IPFS image: {len(ipfs_image_data)} bytes")
+                        else:
+                            logger.warning(f"⚠️ IPFS image download also failed")
+                    else:
+                        logger.warning(f"⚠️ No IPFS image URLs found")
+                except Exception as ipfs_error:
+                    logger.warning(f"⚠️ IPFS fallback failed: {ipfs_error}")
+            
+            if not image_data:
                 if is_cloudinary:
-                    logger.error(f"❌ Error downloading Cloudinary image (critical): {e}", exc_info=True)
+                    logger.error(f"❌ CRITICAL: All image download attempts failed - Discord won't be able to display image!")
+                    logger.error(f"❌ Tried {len(urls_to_try)} Cloudinary URL(s) and IPFS fallback")
                 else:
-                    logger.debug(f"Exception downloading image (non-critical): {e}")
+                    logger.debug(f"Could not download image from embed URL (may be too large)")
         
         # Get channel if not already set (in case it wasn't found at startup)
         global discord_channel
@@ -454,10 +500,32 @@ async def process_webhook_events_grouped(tx_hash: str, events: List[dict]):
                 else:
                     logger.warning(f"No image URLs available for token ID(s): {token_ids}")
                 
+                # Verify file is valid before sending
                 if file:
-                    logger.info(f"📎 Sending message with embed + file attachment ({len(image_data)} bytes)")
-                    message = await discord_channel.send(embed=embed, file=file)
-                    logger.info(f"✅ Posted sale with image attachment - Message ID: {message.id}")
+                    if image_data and len(image_data) > 0:
+                        logger.info(f"📎 Sending message with embed + file attachment ({len(image_data)} bytes)")
+                        logger.info(f"📎 File object: {file.filename}, size: {len(image_data)} bytes")
+                        try:
+                            message = await discord_channel.send(embed=embed, file=file)
+                            logger.info(f"✅ Posted sale with image attachment - Message ID: {message.id}")
+                            # Verify the message was sent with attachment
+                            if message.attachments:
+                                logger.info(f"✅ Message has {len(message.attachments)} attachment(s) - image should be visible!")
+                                for att in message.attachments:
+                                    logger.info(f"✅ Attachment: {att.filename}, size: {att.size} bytes, URL: {att.url[:80]}...")
+                            else:
+                                logger.warning(f"⚠️ Message sent but has no attachments - file may not have been attached!")
+                        except discord.HTTPException as e:
+                            logger.error(f"❌ Discord API error sending message with file: {e.status} - {e.text}")
+                            if e.status == 413:
+                                logger.error(f"❌ File too large ({len(image_data)} bytes) - Discord limit is 8MB")
+                            # Try sending without file as fallback
+                            logger.warning(f"⚠️ Attempting to send message without file attachment...")
+                            message = await discord_channel.send(embed=embed)
+                            logger.info(f"✅ Posted sale without image - Message ID: {message.id}")
+                    else:
+                        logger.error(f"❌ File object exists but image_data is empty or None!")
+                        file = None  # Don't send invalid file
                 else:
                     if image_urls:
                         is_cloudinary = 'cloudinary.com' in image_urls[0]
@@ -713,45 +781,89 @@ async def lastsale(interaction: discord.Interaction):
             
             if is_cloudinary:
                 logger.info(f"📥 MUST download Cloudinary image (Discord can't fetch these URLs): {embed_url[:80]}...")
+                # Try multiple Cloudinary URL variations if first fails
+                urls_to_try = [embed_url]
+                # Try thumbnail URL if we have it
+                if len(image_urls) > 1:
+                    urls_to_try.append(image_urls[1])
+                # Try constructing alternative Cloudinary URLs
+                if '/f_png' in embed_url:
+                    # Try without f_png transformation
+                    alt_url = embed_url.replace('/f_png,so_0/', '/').replace('/f_png/', '/')
+                    if alt_url != embed_url:
+                        urls_to_try.append(alt_url)
             else:
                 logger.info(f"📥 Attempting to download image for file attachment: {embed_url[:80]}...")
+                urls_to_try = [embed_url]
             
-            try:
-                # Download the image - CRITICAL for Cloudinary URLs
-                image_data = await sales_fetcher.download_image(embed_url)
-                if image_data:
-                    # Determine file extension from URL or content type
-                    ext = "png"  # Default
-                    url_lower = embed_url.lower()
-                    if ".jpg" in url_lower or ".jpeg" in url_lower:
-                        ext = "jpg"
-                    elif ".gif" in url_lower:
-                        ext = "gif"
-                    elif ".webp" in url_lower:
-                        ext = "webp"
-                    elif ".png" in url_lower or "f_png" in url_lower:
-                        ext = "png"
-                    
-                    file = discord.File(
-                        io.BytesIO(image_data),
-                        filename=f"nft_{sale.token_id or 'image'}.{ext}"
-                    )
-                    logger.info(f"✅ Successfully downloaded image: {len(image_data)} bytes, extension: {ext}")
-                    if is_cloudinary:
-                        logger.info(f"✅ Cloudinary image downloaded - will attach as file (Discord can't fetch Cloudinary URLs)")
-                else:
-                    if is_cloudinary:
-                        logger.error(f"❌ CRITICAL: Failed to download Cloudinary image - Discord won't be able to display it!")
-                        logger.error(f"❌ Image URL: {embed_url[:150]}...")
+            # Try downloading from multiple URLs
+            for attempt, url_to_try in enumerate(urls_to_try, 1):
+                try:
+                    logger.info(f"📥 Attempt {attempt}/{len(urls_to_try)}: Downloading from {url_to_try[:80]}...")
+                    # Download the image - CRITICAL for Cloudinary URLs
+                    image_data = await sales_fetcher.download_image(url_to_try)
+                    if image_data:
+                        # Determine file extension from URL or content type
+                        ext = "png"  # Default
+                        url_lower = url_to_try.lower()
+                        if ".jpg" in url_lower or ".jpeg" in url_lower:
+                            ext = "jpg"
+                        elif ".gif" in url_lower:
+                            ext = "gif"
+                        elif ".webp" in url_lower:
+                            ext = "webp"
+                        elif ".png" in url_lower or "f_png" in url_lower:
+                            ext = "png"
+                        
+                        file = discord.File(
+                            io.BytesIO(image_data),
+                            filename=f"nft_{sale.token_id or 'image'}.{ext}"
+                        )
+                        logger.info(f"✅ Successfully downloaded image: {len(image_data)} bytes, extension: {ext}")
+                        if is_cloudinary:
+                            logger.info(f"✅ Cloudinary image downloaded - will attach as file (Discord can't fetch Cloudinary URLs)")
+                        break  # Success - stop trying other URLs
                     else:
-                        logger.debug(f"Could not download image from embed URL (may be too large)")
-            except Exception as e:
+                        logger.warning(f"⚠️ Attempt {attempt} failed: No image data returned from {url_to_try[:80]}...")
+                        if attempt < len(urls_to_try):
+                            logger.info(f"🔄 Trying next URL...")
+                except Exception as e:
+                    logger.warning(f"⚠️ Attempt {attempt} failed: {e}")
+                    if attempt < len(urls_to_try):
+                        logger.info(f"🔄 Trying next URL...")
+                    continue
+            
+            # If all Cloudinary URLs failed, try IPFS fallback
+            if not image_data and is_cloudinary and token_ids:
+                logger.warning(f"⚠️ All Cloudinary URLs failed, trying IPFS metadata fallback...")
+                try:
+                    ipfs_urls = await sales_fetcher.get_ipfs_image_urls(token_ids[0], timeout=5.0)
+                    if ipfs_urls:
+                        logger.info(f"✅ Found {len(ipfs_urls)} IPFS image URL(s), trying first one...")
+                        ipfs_image_data = await sales_fetcher.download_image(ipfs_urls[0])
+                        if ipfs_image_data:
+                            ext = "png"
+                            if ".jpg" in ipfs_urls[0].lower() or ".jpeg" in ipfs_urls[0].lower():
+                                ext = "jpg"
+                            file = discord.File(
+                                io.BytesIO(ipfs_image_data),
+                                filename=f"nft_{sale.token_id or 'image'}.{ext}"
+                            )
+                            image_data = ipfs_image_data
+                            logger.info(f"✅ Successfully downloaded IPFS image: {len(ipfs_image_data)} bytes")
+                        else:
+                            logger.warning(f"⚠️ IPFS image download also failed")
+                    else:
+                        logger.warning(f"⚠️ No IPFS image URLs found")
+                except Exception as ipfs_error:
+                    logger.warning(f"⚠️ IPFS fallback failed: {ipfs_error}")
+            
+            if not image_data:
                 if is_cloudinary:
-                    logger.error(f"❌ CRITICAL: Error downloading Cloudinary image: {e}", exc_info=True)
-                    logger.error(f"❌ Image URL: {embed_url[:150]}...")
+                    logger.error(f"❌ CRITICAL: All image download attempts failed - Discord won't be able to display image!")
+                    logger.error(f"❌ Tried {len(urls_to_try)} Cloudinary URL(s) and IPFS fallback")
                 else:
-                    logger.debug(f"Exception downloading image (non-critical): {e}")
-                # Don't log as warning - embed image should still work
+                    logger.debug(f"Could not download image from embed URL (may be too large)")
         
         # Log image information for debugging
         if image_urls:
@@ -761,16 +873,42 @@ async def lastsale(interaction: discord.Interaction):
         
         # Send message with embed and file attachment
         if file:
-            logger.info(f"Sending message with embed + file attachment ({len(image_data)} bytes)")
-            message = await interaction.followup.send(embed=embed, file=file)
-            logger.info(f"✓ Sent message with image attachment - Message ID: {message.id if hasattr(message, 'id') else 'N/A'}")
+            if image_data and len(image_data) > 0:
+                logger.info(f"📎 Sending message with embed + file attachment ({len(image_data)} bytes)")
+                logger.info(f"📎 File object: {file.filename}, size: {len(image_data)} bytes")
+                try:
+                    message = await interaction.followup.send(embed=embed, file=file)
+                    logger.info(f"✅ Sent message with image attachment - Message ID: {message.id if hasattr(message, 'id') else 'N/A'}")
+                    # Verify the message was sent with attachment
+                    if hasattr(message, 'attachments') and message.attachments:
+                        logger.info(f"✅ Message has {len(message.attachments)} attachment(s) - image should be visible!")
+                        for att in message.attachments:
+                            logger.info(f"✅ Attachment: {att.filename}, size: {att.size} bytes, URL: {att.url[:80]}...")
+                    else:
+                        logger.warning(f"⚠️ Message sent but has no attachments - file may not have been attached!")
+                except discord.HTTPException as e:
+                    logger.error(f"❌ Discord API error sending message with file: {e.status} - {e.text}")
+                    if e.status == 413:
+                        logger.error(f"❌ File too large ({len(image_data)} bytes) - Discord limit is 8MB")
+                    # Try sending without file as fallback
+                    logger.warning(f"⚠️ Attempting to send message without file attachment...")
+                    message = await interaction.followup.send(embed=embed)
+                    logger.info(f"✅ Sent message without image - Message ID: {message.id if hasattr(message, 'id') else 'N/A'}")
+            else:
+                logger.error(f"❌ File object exists but image_data is empty or None!")
+                file = None  # Don't send invalid file
         else:
             if image_urls:
-                logger.info(f"Sending message with embed image URL only (file download failed or not attempted)")
+                is_cloudinary = 'cloudinary.com' in image_urls[0]
+                if is_cloudinary:
+                    logger.error(f"❌ CRITICAL: Cloudinary image download failed - Discord won't be able to display image!")
+                    logger.error(f"❌ Image URL: {image_urls[0][:100]}...")
+                else:
+                    logger.info(f"📤 Sending message with embed image URL only (file download failed or not attempted)")
             else:
-                logger.warning(f"Sending message without image - no image URLs found for token ID(s): {token_ids}")
+                logger.warning(f"⚠️ Sending message without image - no image URLs found for token ID(s): {token_ids}")
             message = await interaction.followup.send(embed=embed)
-            logger.info(f"✓ Sent message - Message ID: {message.id if hasattr(message, 'id') else 'N/A'}")
+            logger.info(f"✅ Sent message - Message ID: {message.id if hasattr(message, 'id') else 'N/A'}")
         
         # Log embed image status
         if embed.image:

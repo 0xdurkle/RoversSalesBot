@@ -678,6 +678,34 @@ class SalesFetcher:
         
         return image_urls
     
+    def _extract_ipfs_hash_from_video_url(self, video_url: str) -> Optional[Tuple[str, str]]:
+        """
+        Extract IPFS hash and token ID from video URL pattern like:
+        https://ipfs.io/ipfs/QmXNofSXgZNVTnu1jdaFHM42M4BM4Nnv8Srv7Zat4ueAPa/2665.mp4
+        
+        Returns:
+            Tuple of (ipfs_hash, token_id) or None if not found
+        """
+        if not video_url or not isinstance(video_url, str):
+            return None
+        
+        # Pattern: .../ipfs/HASH/TOKEN_ID.mp4
+        if '/ipfs/' in video_url:
+            parts = video_url.split('/ipfs/')
+            if len(parts) > 1:
+                rest = parts[1]
+                # Split by / to get hash and filename
+                hash_and_file = rest.split('/')
+                if len(hash_and_file) >= 2:
+                    ipfs_hash = hash_and_file[0].split('?')[0].split('#')[0]  # Remove query params
+                    filename = hash_and_file[1].split('?')[0].split('#')[0]  # Remove query params
+                    # Extract token ID from filename (e.g., "2665.mp4" -> "2665")
+                    if '.' in filename:
+                        token_id = filename.split('.')[0]
+                        if ipfs_hash and token_id:
+                            return (ipfs_hash, token_id)
+        return None
+    
     def _extract_ipfs_hash(self, url_or_hash: str) -> Optional[str]:
         """
         Extract IPFS hash from various URL formats.
