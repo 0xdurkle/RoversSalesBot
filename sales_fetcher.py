@@ -310,7 +310,11 @@ class SalesFetcher:
             block_num = int(block_hex, 16)
             block_hex_str = hex(block_num)
             
-            # Get ERC-20 transfers for this block (WETH only)
+            # Also check previous block in case WETH transfer was in different block
+            prev_block_hex_str = hex(block_num - 1) if block_num > 0 else block_hex_str
+            
+            # Get ERC-20 transfers for this block and previous block (WETH only)
+            # Check current block first
             transfers = await self.get_asset_transfers(
                 contract_address=WETH_CONTRACT,
                 category=["erc20"],
@@ -333,7 +337,27 @@ class SalesFetcher:
                         except (ValueError, TypeError):
                             pass
             
+            # If not found in current block, check previous block
+            if weth_total == 0 and block_num > 0:
+                transfers_prev = await self.get_asset_transfers(
+                    contract_address=WETH_CONTRACT,
+                    category=["erc20"],
+                    from_block=prev_block_hex_str,
+                    to_block=prev_block_hex_str
+                )
+                transfers_list_prev = transfers_prev.get("transfers", [])
+                for transfer in transfers_list_prev:
+                    transfer_hash = transfer.get("hash", "")
+                    if transfer_hash and transfer_hash.lower() == tx_hash.lower():
+                        value_hex = transfer.get("value", "0x0")
+                        if value_hex and value_hex != "0x0":
+                            try:
+                                weth_total += int(value_hex, 16)
+                            except (ValueError, TypeError):
+                                pass
+            
             if weth_total > 0:
+                logger.debug(f"Found WETH transfer: {weth_total} wei for tx {tx_hash[:16]}...")
                 return (weth_total, True)
             
             return (0, False)

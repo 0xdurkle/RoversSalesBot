@@ -384,90 +384,16 @@ async def process_webhook_events_grouped(tx_hash: str, events: List[dict]):
         # Create embed with the image URL
         embed = create_sale_embed(sale, image_urls)
         
-        # Download image for file attachment - REQUIRED for Cloudinary URLs
-        # Discord can't fetch Cloudinary URLs, so we MUST download and attach as file
+        # Always extract frame from video for video NFTs (MOST RELIABLE - Cloudinary URLs don't work)
         file = None
         image_data = None
-        is_cloudinary = False
         if token_ids and len(token_ids) > 0 and image_urls:
             embed_url = image_urls[0]
             is_cloudinary = 'cloudinary.com' in embed_url
             
-            if is_cloudinary:
-                    logger.info(f"📥 MUST download Cloudinary image (Discord can't fetch these URLs): {embed_url[:80]}...")
-                    # Try multiple Cloudinary URL variations if first fails
-                    urls_to_try = [embed_url]
-                    
-                    # Also try to get pngUrl from metadata if available (different Cloudinary URL)
-                    try:
-                        if token_ids and len(token_ids) > 0:
-                            metadata = await sales_fetcher.get_nft_metadata(token_ids[0])
-                            if metadata:
-                                top_image = metadata.get("image", {})
-                                if isinstance(top_image, dict):
-                                    png_url = top_image.get("pngUrl")
-                                    if png_url and isinstance(png_url, str) and 'cloudinary.com' in png_url:
-                                        if png_url not in urls_to_try:
-                                            urls_to_try.append(png_url)
-                                            logger.info(f"📥 Added pngUrl from metadata to try list: {png_url[:80]}...")
-                    except Exception as e:
-                        logger.debug(f"Could not fetch pngUrl from metadata: {e}")
-                    
-                    # Try thumbnail URL if we have it
-                    if len(image_urls) > 1:
-                        if image_urls[1] not in urls_to_try:
-                            urls_to_try.append(image_urls[1])
-                    
-                    # Try constructing alternative Cloudinary URLs
-                    if '/f_png' in embed_url:
-                        # Try without f_png transformation
-                        alt_url = embed_url.replace('/f_png,so_0/', '/').replace('/f_png/', '/')
-                        if alt_url != embed_url and alt_url not in urls_to_try:
-                            urls_to_try.append(alt_url)
-            else:
-                logger.info(f"📥 Attempting to download image for file attachment: {embed_url[:80]}...")
-                urls_to_try = [embed_url]
-            
-            # Try downloading from multiple URLs
-            for attempt, url_to_try in enumerate(urls_to_try, 1):
-                try:
-                    logger.info(f"📥 Attempt {attempt}/{len(urls_to_try)}: Downloading from {url_to_try[:80]}...")
-                    # Download the image - CRITICAL for Cloudinary URLs
-                    image_data = await sales_fetcher.download_image(url_to_try)
-                    if image_data:
-                        # Determine file extension from URL or content type
-                        ext = "png"  # Default
-                        url_lower = url_to_try.lower()
-                        if ".jpg" in url_lower or ".jpeg" in url_lower:
-                            ext = "jpg"
-                        elif ".gif" in url_lower:
-                            ext = "gif"
-                        elif ".webp" in url_lower:
-                            ext = "webp"
-                        elif ".png" in url_lower or "f_png" in url_lower:
-                            ext = "png"
-                        
-                        file = discord.File(
-                            io.BytesIO(image_data),
-                            filename=f"nft_{sale.token_id or 'image'}.{ext}"
-                        )
-                        logger.info(f"✅ Successfully downloaded image: {len(image_data)} bytes, extension: {ext}")
-                        if is_cloudinary:
-                            logger.info(f"✅ Cloudinary image downloaded - will attach as file (Discord can't fetch Cloudinary URLs)")
-                        break  # Success - stop trying other URLs
-                    else:
-                        logger.warning(f"⚠️ Attempt {attempt} failed: No image data returned from {url_to_try[:80]}...")
-                        if attempt < len(urls_to_try):
-                            logger.info(f"🔄 Trying next URL...")
-                except Exception as e:
-                    logger.warning(f"⚠️ Attempt {attempt} failed: {e}")
-                    if attempt < len(urls_to_try):
-                        logger.info(f"🔄 Trying next URL...")
-                    continue
-            
-            # If all Cloudinary URLs failed, extract frame from video (MOST RELIABLE)
-            if not image_data and is_cloudinary and token_ids:
-                logger.warning(f"⚠️ All Cloudinary URLs failed, extracting frame from video...")
+            # For video NFTs (Cloudinary URLs indicate video), always extract frame from video
+            if is_cloudinary and token_ids:
+                logger.info(f"🎬 Video NFT detected - extracting frame from video (most reliable method)...")
                 try:
                     # Get video URL from metadata
                     metadata = await sales_fetcher.get_nft_metadata(token_ids[0])
@@ -496,6 +422,25 @@ async def process_webhook_events_grouped(tx_hash: str, events: List[dict]):
                         logger.warning(f"⚠️ Could not fetch metadata for video extraction")
                 except Exception as video_error:
                     logger.warning(f"⚠️ Video frame extraction failed: {video_error}")
+            else:
+                # For non-video NFTs, try downloading the image URL
+                logger.info(f"📥 Attempting to download image: {embed_url[:80]}...")
+                image_data = await sales_fetcher.download_image(embed_url)
+                if image_data:
+                    ext = "png"
+                    url_lower = embed_url.lower()
+                    if ".jpg" in url_lower or ".jpeg" in url_lower:
+                        ext = "jpg"
+                    elif ".gif" in url_lower:
+                        ext = "gif"
+                    elif ".webp" in url_lower:
+                        ext = "webp"
+                    
+                    file = discord.File(
+                        io.BytesIO(image_data),
+                        filename=f"nft_{sale.token_id or 'image'}.{ext}"
+                    )
+                    logger.info(f"✅ Successfully downloaded image: {len(image_data)} bytes")
             
             if not image_data:
                 if is_cloudinary:
@@ -795,90 +740,16 @@ async def lastsale(interaction: discord.Interaction):
         embed = create_sale_embed(sale, image_urls)
         embed.set_footer(text=f"Requested by {interaction.user.display_name} | NFT Sales Monitor")
         
-        # Download image for file attachment - REQUIRED for Cloudinary URLs
-        # Discord can't fetch Cloudinary URLs, so we MUST download and attach as file
+        # Always extract frame from video for video NFTs (MOST RELIABLE - Cloudinary URLs don't work)
         file = None
         image_data = None
-        is_cloudinary = False
         if token_ids and len(token_ids) > 0 and image_urls:
             embed_url = image_urls[0]
             is_cloudinary = 'cloudinary.com' in embed_url
             
-            if is_cloudinary:
-                    logger.info(f"📥 MUST download Cloudinary image (Discord can't fetch these URLs): {embed_url[:80]}...")
-                    # Try multiple Cloudinary URL variations if first fails
-                    urls_to_try = [embed_url]
-                    
-                    # Also try to get pngUrl from metadata if available (different Cloudinary URL)
-                    try:
-                        if token_ids and len(token_ids) > 0:
-                            metadata = await sales_fetcher.get_nft_metadata(token_ids[0])
-                            if metadata:
-                                top_image = metadata.get("image", {})
-                                if isinstance(top_image, dict):
-                                    png_url = top_image.get("pngUrl")
-                                    if png_url and isinstance(png_url, str) and 'cloudinary.com' in png_url:
-                                        if png_url not in urls_to_try:
-                                            urls_to_try.append(png_url)
-                                            logger.info(f"📥 Added pngUrl from metadata to try list: {png_url[:80]}...")
-                    except Exception as e:
-                        logger.debug(f"Could not fetch pngUrl from metadata: {e}")
-                    
-                    # Try thumbnail URL if we have it
-                    if len(image_urls) > 1:
-                        if image_urls[1] not in urls_to_try:
-                            urls_to_try.append(image_urls[1])
-                    
-                    # Try constructing alternative Cloudinary URLs
-                    if '/f_png' in embed_url:
-                        # Try without f_png transformation
-                        alt_url = embed_url.replace('/f_png,so_0/', '/').replace('/f_png/', '/')
-                        if alt_url != embed_url and alt_url not in urls_to_try:
-                            urls_to_try.append(alt_url)
-            else:
-                logger.info(f"📥 Attempting to download image for file attachment: {embed_url[:80]}...")
-                urls_to_try = [embed_url]
-            
-            # Try downloading from multiple URLs
-            for attempt, url_to_try in enumerate(urls_to_try, 1):
-                try:
-                    logger.info(f"📥 Attempt {attempt}/{len(urls_to_try)}: Downloading from {url_to_try[:80]}...")
-                    # Download the image - CRITICAL for Cloudinary URLs
-                    image_data = await sales_fetcher.download_image(url_to_try)
-                    if image_data:
-                        # Determine file extension from URL or content type
-                        ext = "png"  # Default
-                        url_lower = url_to_try.lower()
-                        if ".jpg" in url_lower or ".jpeg" in url_lower:
-                            ext = "jpg"
-                        elif ".gif" in url_lower:
-                            ext = "gif"
-                        elif ".webp" in url_lower:
-                            ext = "webp"
-                        elif ".png" in url_lower or "f_png" in url_lower:
-                            ext = "png"
-                        
-                        file = discord.File(
-                            io.BytesIO(image_data),
-                            filename=f"nft_{sale.token_id or 'image'}.{ext}"
-                        )
-                        logger.info(f"✅ Successfully downloaded image: {len(image_data)} bytes, extension: {ext}")
-                        if is_cloudinary:
-                            logger.info(f"✅ Cloudinary image downloaded - will attach as file (Discord can't fetch Cloudinary URLs)")
-                        break  # Success - stop trying other URLs
-                    else:
-                        logger.warning(f"⚠️ Attempt {attempt} failed: No image data returned from {url_to_try[:80]}...")
-                        if attempt < len(urls_to_try):
-                            logger.info(f"🔄 Trying next URL...")
-                except Exception as e:
-                    logger.warning(f"⚠️ Attempt {attempt} failed: {e}")
-                    if attempt < len(urls_to_try):
-                        logger.info(f"🔄 Trying next URL...")
-                    continue
-            
-            # If all Cloudinary URLs failed, extract frame from video (MOST RELIABLE)
-            if not image_data and is_cloudinary and token_ids:
-                logger.warning(f"⚠️ All Cloudinary URLs failed, extracting frame from video...")
+            # For video NFTs (Cloudinary URLs indicate video), always extract frame from video
+            if is_cloudinary and token_ids:
+                logger.info(f"🎬 Video NFT detected - extracting frame from video (most reliable method)...")
                 try:
                     # Get video URL from metadata
                     metadata = await sales_fetcher.get_nft_metadata(token_ids[0])
@@ -907,6 +778,25 @@ async def lastsale(interaction: discord.Interaction):
                         logger.warning(f"⚠️ Could not fetch metadata for video extraction")
                 except Exception as video_error:
                     logger.warning(f"⚠️ Video frame extraction failed: {video_error}")
+            else:
+                # For non-video NFTs, try downloading the image URL
+                logger.info(f"📥 Attempting to download image: {embed_url[:80]}...")
+                image_data = await sales_fetcher.download_image(embed_url)
+                if image_data:
+                    ext = "png"
+                    url_lower = embed_url.lower()
+                    if ".jpg" in url_lower or ".jpeg" in url_lower:
+                        ext = "jpg"
+                    elif ".gif" in url_lower:
+                        ext = "gif"
+                    elif ".webp" in url_lower:
+                        ext = "webp"
+                    
+                    file = discord.File(
+                        io.BytesIO(image_data),
+                        filename=f"nft_{sale.token_id or 'image'}.{ext}"
+                    )
+                    logger.info(f"✅ Successfully downloaded image: {len(image_data)} bytes")
             
             if not image_data:
                 if is_cloudinary:
