@@ -415,15 +415,15 @@ async def process_webhook_events_grouped(tx_hash: str, events: List[dict]):
                                     image_data = frame_data
                                     logger.info(f"✅ Successfully extracted frame from video: {len(frame_data)} bytes")
                                 else:
-                                    logger.warning(f"⚠️ Frame extraction failed")
+                                    logger.error(f"❌ Frame extraction failed - no image will be shown")
                             else:
-                                logger.warning(f"⚠️ No video URL found in metadata")
+                                logger.error(f"❌ No video URL found in metadata - originalUrl: {original_url[:100] if original_url else 'None'}...")
                         else:
-                            logger.warning(f"⚠️ Image metadata is not a dict")
+                            logger.error(f"❌ Image metadata is not a dict: {type(top_image)}")
                     else:
-                        logger.warning(f"⚠️ Could not fetch metadata for video extraction")
+                        logger.error(f"❌ Could not fetch metadata for video extraction")
                 except Exception as video_error:
-                    logger.warning(f"⚠️ Video frame extraction failed: {video_error}")
+                    logger.error(f"❌ Video frame extraction failed: {video_error}", exc_info=True)
             else:
                 # For non-video NFTs, try downloading the image URL
                 logger.info(f"📥 Attempting to download image: {embed_url[:80]}...")
@@ -771,15 +771,15 @@ async def lastsale(interaction: discord.Interaction):
                                     image_data = frame_data
                                     logger.info(f"✅ Successfully extracted frame from video: {len(frame_data)} bytes")
                                 else:
-                                    logger.warning(f"⚠️ Frame extraction failed")
+                                    logger.error(f"❌ Frame extraction failed - no image will be shown")
                             else:
-                                logger.warning(f"⚠️ No video URL found in metadata")
+                                logger.error(f"❌ No video URL found in metadata - originalUrl: {original_url[:100] if original_url else 'None'}...")
                         else:
-                            logger.warning(f"⚠️ Image metadata is not a dict")
+                            logger.error(f"❌ Image metadata is not a dict: {type(top_image)}")
                     else:
-                        logger.warning(f"⚠️ Could not fetch metadata for video extraction")
+                        logger.error(f"❌ Could not fetch metadata for video extraction")
                 except Exception as video_error:
-                    logger.warning(f"⚠️ Video frame extraction failed: {video_error}")
+                    logger.error(f"❌ Video frame extraction failed: {video_error}", exc_info=True)
             else:
                 # For non-video NFTs, try downloading the image URL
                 logger.info(f"📥 Attempting to download image: {embed_url[:80]}...")

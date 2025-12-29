@@ -260,7 +260,8 @@ class SalesFetcher:
     async def _get_transaction_price_simple(
         self,
         tx_hash: str,
-        seller_address: Optional[str] = None
+        seller_address: Optional[str] = None,
+        buyer_address: Optional[str] = None
     ) -> Tuple[int, bool]:
         """
         Get transaction price in wei.
@@ -269,6 +270,7 @@ class SalesFetcher:
         Args:
             tx_hash: Transaction hash
             seller_address: Seller address (to match WETH transfers to seller)
+            buyer_address: Buyer address (to match WETH transfers from buyer)
             
         Returns:
             Tuple of (price in wei, is_weth: bool)
@@ -310,30 +312,43 @@ class SalesFetcher:
             weth_total = 0
             transfers_list = transfers.get("transfers", [])
             
-            # Filter transfers for this specific transaction
-            # WETH payment goes TO the seller, so check "to" address matches seller
             seller_lower = seller_address.lower() if seller_address else None
+            buyer_lower = buyer_address.lower() if buyer_address else None
+            
+            # Filter transfers - WETH payment goes TO the seller (seller receives payment)
+            # Check both: same transaction hash OR matching addresses (WETH might be in different tx)
             for transfer in transfers_list:
                 transfer_hash = transfer.get("hash", "")
-                # Match by transaction hash
-                if transfer_hash and transfer_hash.lower() == tx_hash.lower():
-                    # Get WETH amount
-                    value_hex = transfer.get("value", "0x0")
-                    if value_hex and value_hex != "0x0":
-                        try:
-                            weth_amount = int(value_hex, 16)
-                            # If we have seller address, verify WETH goes to seller (seller receives payment)
-                            if seller_lower:
-                                transfer_to = transfer.get("to", "").lower()
-                                if transfer_to == seller_lower:
-                                    weth_total += weth_amount
-                                    logger.info(f"✅ Found WETH transfer to seller {seller_lower[:10]}...: {weth_amount / (10**18):.6f} WETH")
-                            else:
+                transfer_from = transfer.get("from", "").lower()
+                transfer_to = transfer.get("to", "").lower()
+                
+                # Get WETH amount
+                value_hex = transfer.get("value", "0x0")
+                if value_hex and value_hex != "0x0":
+                    try:
+                        weth_amount = int(value_hex, 16)
+                        
+                        # Match by transaction hash first (most reliable)
+                        if transfer_hash and transfer_hash.lower() == tx_hash.lower():
+                            if seller_lower and transfer_to == seller_lower:
+                                weth_total += weth_amount
+                                logger.info(f"✅ Found WETH in same tx: {weth_amount / (10**18):.6f} WETH to seller {seller_lower[:10]}...")
+                            elif not seller_lower:
                                 # No seller address, just sum all WETH transfers in this tx
                                 weth_total += weth_amount
                                 logger.debug(f"Found WETH transfer (no seller check): {weth_amount / (10**18):.6f} WETH")
-                        except (ValueError, TypeError):
-                            pass
+                        # Also check if WETH transfer involves the same addresses (might be different tx)
+                        elif seller_lower and buyer_lower:
+                            # WETH goes from buyer to seller
+                            if transfer_from == buyer_lower and transfer_to == seller_lower:
+                                weth_total += weth_amount
+                                logger.info(f"✅ Found WETH in different tx: {weth_amount / (10**18):.6f} WETH from buyer {buyer_lower[:10]}... to seller {seller_lower[:10]}...")
+                        elif seller_lower and transfer_to == seller_lower:
+                            # WETH goes to seller (no buyer check)
+                            weth_total += weth_amount
+                            logger.info(f"✅ Found WETH to seller: {weth_amount / (10**18):.6f} WETH to {seller_lower[:10]}...")
+                    except (ValueError, TypeError):
+                        pass
             
             if weth_total > 0:
                 logger.info(f"✅ Found WETH transfer: {weth_total / (10**18):.6f} WETH for tx {tx_hash[:16]}...")
