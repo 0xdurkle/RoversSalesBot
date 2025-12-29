@@ -367,9 +367,15 @@ async def process_webhook_events_grouped(tx_hash: str, events: List[dict]):
                     if not image_urls:
                         logger.warning(f"No images found for webhook sale token ID(s): {token_ids}")
                 logger.info(
-                f"Posted sale: {sale.token_count} NFT(s) for {format_price(price, is_weth)} "
-                f"in tx {tx_hash}"
-            )
+                    f"Posted sale: {sale.token_count} NFT(s) for {format_price(price, is_weth)} "
+                    f"in tx {tx_hash}"
+                )
+            except discord.Forbidden:
+                logger.error(f"Bot doesn't have permission to send messages in channel {DISCORD_CHANNEL_ID}")
+            except discord.NotFound:
+                logger.error(f"Channel {DISCORD_CHANNEL_ID} not found - bot may not be in the server")
+            except Exception as e:
+                logger.error(f"Error posting to Discord: {e}")
         else:
             logger.error(f"Discord channel {DISCORD_CHANNEL_ID} not available - check bot is in server and has access")
         
