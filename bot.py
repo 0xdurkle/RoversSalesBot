@@ -228,10 +228,13 @@ async def process_webhook_events_grouped(tx_hash: str, events: List[dict]):
             return
         
         # Filter events for our contract
-        contract_events = [
-            e for e in events
-            if e.get("contractAddress", "").lower() == NFT_CONTRACT_ADDRESS
-        ]
+        contract_events = []
+        for e in events:
+            # Contract address can be in log.address or contractAddress
+            log_data = e.get("log", {})
+            contract_addr = log_data.get("address", "").lower() or e.get("contractAddress", "").lower()
+            if contract_addr == NFT_CONTRACT_ADDRESS:
+                contract_events.append(e)
         
         if not contract_events:
             logger.debug(f"No events for our contract in {tx_hash}")
@@ -252,11 +255,37 @@ async def process_webhook_events_grouped(tx_hash: str, events: List[dict]):
             if to_addr == "0x0000000000000000000000000000000000000000":
                 continue
             
-            token_id = event.get("tokenId", "")
+            # Extract token ID - can be in different places depending on token standard
+            token_id = None
+            event_data = event.get("event", {})
+            
+            # Check ERC-721 metadata
+            erc721_meta = event_data.get("erc721Metadata")
+            if erc721_meta:
+                token_id = erc721_meta.get("tokenId", "")
+            
+            # Check ERC-1155 metadata
+            if not token_id:
+                erc1155_meta = event_data.get("erc1155Metadata", [])
+                if erc1155_meta and len(erc1155_meta) > 0:
+                    token_id = erc1155_meta[0].get("tokenId", "")
+            
+            # Fallback to top-level tokenId
+            if not token_id:
+                token_id = event.get("tokenId", "")
+            
             if token_id:
                 # Convert hex to decimal string if needed
-                if token_id.startswith("0x"):
-                    token_id = str(int(token_id, 16))
+                if isinstance(token_id, str) and token_id.startswith("0x"):
+                    try:
+                        token_id = str(int(token_id, 16))
+                    except ValueError:
+                        # If it's a very long hex string (ERC-1155), try to extract the numeric part
+                        # ERC-1155 tokenIds can be complex, so we'll use the hex string as-is if conversion fails
+                        logger.debug(f"Could not convert tokenId {token_id} to decimal, using as-is")
+                elif not isinstance(token_id, str):
+                    token_id = str(token_id)
+                
                 token_ids.append(token_id)
             
             buyers.add(to_addr)
@@ -388,21 +417,52 @@ async def handle_alchemy_webhook(request: web.Request) -> web.Response:
     try:
         # Parse JSON payload
         data = await request.json()
-        logger.debug(f"Received webhook: {data.get('webhookId', 'unknown')}")
+        webhook_id = data.get('webhookId', 'unknown')
+        logger.info(f"Received webhook: {webhook_id}")
         
-        # Extract activity events
+        # Alchemy can send events in two formats:
+        # 1. Array format: {"activity": [event1, event2, ...]}
+        # 2. Single event format: {event data at top level}
+        
+        events_to_process = []
+        
+        # Check for activity array first
         activity = data.get("activity", [])
-        if not activity:
+        if activity:
+            events_to_process = activity
+        else:
+            # Check if this is a single event at top level
+            event_type = data.get("type", "")
+            if event_type == "NFT_ACTIVITY":
+                events_to_process = [data]
+        
+        if not events_to_process:
+            logger.debug("No events found in webhook payload")
             return web.Response(status=200, text="OK")
         
+        logger.info(f"Processing {len(events_to_process)} event(s) from webhook")
+        
         # Process events asynchronously (fire-and-forget)
-        for event in activity:
-            event_type = event.get("eventType", "")
-            if event_type != "NFT_TRANSFER":
+        for event in events_to_process:
+            # Check event type - Alchemy uses "type": "NFT_ACTIVITY"
+            event_type = event.get("type", "")
+            if event_type != "NFT_ACTIVITY":
+                logger.debug(f"Skipping event type: {event_type}")
                 continue
             
-            tx_hash = event.get("hash", "")
+            # Get transaction hash (can be "transactionHash" or "hash")
+            tx_hash = event.get("transactionHash") or event.get("hash", "")
             if not tx_hash:
+                logger.warning("Event missing transaction hash, skipping")
+                continue
+            
+            # Get contract address from log.address
+            log_data = event.get("log", {})
+            contract_address = log_data.get("address", "").lower()
+            
+            # Verify it's for our contract
+            if contract_address != NFT_CONTRACT_ADDRESS:
+                logger.debug(f"Event for different contract: {contract_address}, skipping")
                 continue
             
             # Create async task for processing (don't await)
